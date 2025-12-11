@@ -1,4 +1,4 @@
-pyTelegramBotAPI==4.15.0
-psutil==5.9.5
-pyclamd==0.4.0
-speedtest-cli==2.1.3
+pyTelegramBotAPI
+psutil
+pyclamd
+speedtest-cli
