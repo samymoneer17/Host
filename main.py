@@ -1,4 +1,3 @@
-
 import telebot
 from telebot import types
 import os
@@ -10,6 +9,8 @@ import psutil  # لمراقبة العمليات وإدارتها
 import ast  # لتحليل الكود
 import pyclamd  # للتحقق من الفيروسات
 import re  # للتحقق من الأنماط الضارة
+import speedtest  # لإضافة قياس سرعة البوت
+import datetime  # لإضافة وقت التشغيل
 
 # تعيين توكن البوت كمتغير
 BOT_TOKEN = '8156912979:AAHyLYBEM7GBOfFjvwFtJ9Cxkg4uEqxUFLY'
@@ -31,6 +32,13 @@ user_files = {}
 # لتخزين العمليات الجارية
 running_processes = {}
 
+# لتخزين معلومات سرعة البوت
+bot_speed_info = {
+    'last_check': None,
+    'speed': 'M0.1',  # القيمة الافتراضية
+    'ping': 0
+}
+
 # تهيئة ClamAV للتحقق من الفيروسات
 try:
     cd = pyclamd.ClamdAgnostic()
@@ -38,6 +46,64 @@ try:
 except Exception as e:
     print(f"⚠️ خطأ في تهيئة ClamAV: {e}")
     cd = None
+
+# دالة لقياس سرعة البوت
+def check_bot_speed():
+    try:
+        st = speedtest.Speedtest()
+        st.get_best_server()
+        
+        # قياس سرعة التنزيل (بالبت لكل ثانية)
+        download_speed = st.download()
+        
+        # قياس سرعة الرفع (بالبت لكل ثانية)
+        upload_speed = st.upload()
+        
+        # قياس البنغ
+        ping = st.results.ping
+        
+        # تحويل السرعة من بت/ثانية إلى ميغابت/ثانية
+        download_mbps = download_speed / 1_000_000
+        upload_mbps = upload_speed / 1_000_000
+        
+        # تحديد فئة السرعة بناءً على سرعة التنزيل
+        if download_mbps >= 10:
+            speed_category = "M1.0"
+        elif download_mbps >= 5:
+            speed_category = "M0.5"
+        elif download_mbps >= 3:
+            speed_category = "M0.3"
+        elif download_mbps >= 1:
+            speed_category = "M0.2"
+        else:
+            speed_category = "M0.1"
+        
+        # تحديث معلومات السرعة
+        bot_speed_info['last_check'] = datetime.datetime.now()
+        bot_speed_info['speed'] = speed_category
+        bot_speed_info['ping'] = round(ping, 2)
+        bot_speed_info['download'] = round(download_mbps, 2)
+        bot_speed_info['upload'] = round(upload_mbps, 2)
+        
+        return True
+    except Exception as e:
+        print(f"⚠️ خطأ في قياس السرعة: {e}")
+        # استخدام قيم افتراضية في حالة الخطأ
+        bot_speed_info['last_check'] = datetime.datetime.now()
+        bot_speed_info['speed'] = "M0.1"
+        bot_speed_info['ping'] = 0
+        bot_speed_info['download'] = 0
+        bot_speed_info['upload'] = 0
+        return False
+
+# دالة للحصول على معلومات سرعة البوت مع التحديث
+def get_bot_speed():
+    # إذا مر أكثر من 5 دقائق منذ آخر فحص، نقوم بفحص جديد
+    if (bot_speed_info['last_check'] is None or 
+        (datetime.datetime.now() - bot_speed_info['last_check']).seconds > 300):
+        check_bot_speed()
+    
+    return bot_speed_info
 
 # دالة للتحقق من وجود أكواد ضارة في الملف
 def check_for_malicious_code(file_path):
@@ -106,22 +172,66 @@ bot = telebot.TeleBot(BOT_TOKEN)
 def start(message):
     user_id = message.from_user.id
     user_name = message.from_user.first_name  # الحصول على اسم المستخدم
+    
+    # الحصول على سرعة البوت
+    speed_info = get_bot_speed()
+    
     welcome_message = (
         "👋🏻 مرحباً بك، {user_name}!\n\n"
         "أنا بوت متعدد الاستخدامات يساعدك في:\n"
         "📤 رفع الملفات بسهولة.\n"
         "⚡ تشغيل الملفات بأمان.\n\n"
+        "📊 **معلومات البوت:**\n"
+        "⚡ **السرعة:** {speed}\n"
+        "📥 **التنزيل:** {download} Mbps\n"
+        "📤 **الرفع:** {upload} Mbps\n"
+        "⏱️ **البنغ:** {ping} ms\n"
+        "🕐 **آخر تحديث:** {last_check}\n\n"
         "استخدم الأزرار أدناه للتفاعل مع البوت."
-    ).format(user_name=user_name)  # إدراج اسم المستخدم
+    ).format(
+        user_name=user_name,
+        speed=speed_info['speed'],
+        download=speed_info['download'],
+        upload=speed_info['upload'],
+        ping=speed_info['ping'],
+        last_check=speed_info['last_check'].strftime("%Y-%m-%d %H:%M:%S") if speed_info['last_check'] else "غير متوفر"
+    )
 
     # إرسال الصورة مع النص والأزرار في رسالة واحدة  
     image_url = 'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcTc_tNTW84d2jsH0ecXzDQRoIWMtNGzv734Kw&usqp=CAU'  # استبدل هذا بالرابط الصحيح للصورة  
     bot.send_photo(message.chat.id, image_url, caption=welcome_message, reply_markup=create_main_keyboard(), parse_mode='Markdown')
 
+@bot.message_handler(commands=['speed'])
+def speed_command(message):
+    """أمر لفحص سرعة البوت يدويًا"""
+    bot.send_message(message.chat.id, "⚡ جاري فحص سرعة البوت...")
+    
+    if check_bot_speed():
+        speed_info = get_bot_speed()
+        speed_message = (
+            "📊 **نتيجة فحص السرعة:**\n\n"
+            "⚡ **فئة السرعة:** {speed}\n"
+            "📥 **سرعة التنزيل:** {download} Mbps\n"
+            "📤 **سرعة الرفع:** {upload} Mbps\n"
+            "⏱️ **البنغ:** {ping} ms\n"
+            "🕐 **وقت الفحص:** {last_check}\n\n"
+            "✅ تم تحديث معلومات السرعة بنجاح!"
+        ).format(
+            speed=speed_info['speed'],
+            download=speed_info['download'],
+            upload=speed_info['upload'],
+            ping=speed_info['ping'],
+            last_check=speed_info['last_check'].strftime("%Y-%m-%d %H:%M:%S") if speed_info['last_check'] else "غير متوفر"
+        )
+        bot.send_message(message.chat.id, speed_message, parse_mode='Markdown')
+    else:
+        bot.send_message(message.chat.id, "❌ فشل في فحص السرعة. يرجى المحاولة لاحقًا.")
+
 def create_main_keyboard():
     keyboard = types.InlineKeyboardMarkup()
     keyboard.add(types.InlineKeyboardButton("رفع ملف 📤", callback_data='upload'))
     keyboard.add(types.InlineKeyboardButton("عرض جميع الملفات 📂", callback_data='show_files'))
+    keyboard.add(types.InlineKeyboardButton("فحص سرعة البوت ⚡", callback_data='check_speed'))
     keyboard.add(types.InlineKeyboardButton("حذف جميع الملفات 🗑️", callback_data='delete_all_files'))
     keyboard.add(types.InlineKeyboardButton("إيقاف جميع الملفات ⏹️", callback_data='stop_all_files'))
     keyboard.add(types.InlineKeyboardButton("إعادة تشغيل جميع الملفات 🔄", callback_data='restart_all_files'))
@@ -134,6 +244,28 @@ def callback_query(call):
         bot.register_next_step_handler(call.message, handle_document)  # انتظار إرسال الملف
     elif call.data == 'show_files':
         show_all_files(call.message.chat.id, call.from_user.id)
+    elif call.data == 'check_speed':
+        # تحديث سرعة البوت عند الطلب
+        bot.send_message(call.message.chat.id, "⚡ جاري فحص سرعة البوت...")
+        if check_bot_speed():
+            speed_info = get_bot_speed()
+            speed_message = (
+                "📊 **نتيجة فحص السرعة:**\n\n"
+                "⚡ **فئة السرعة:** {speed}\n"
+                "📥 **سرعة التنزيل:** {download} Mbps\n"
+                "📤 **سرعة الرفع:** {upload} Mbps\n"
+                "⏱️ **البنغ:** {ping} ms\n"
+                "🕐 **وقت الفحص:** {last_check}"
+            ).format(
+                speed=speed_info['speed'],
+                download=speed_info['download'],
+                upload=speed_info['upload'],
+                ping=speed_info['ping'],
+                last_check=speed_info['last_check'].strftime("%Y-%m-%d %H:%M:%S") if speed_info['last_check'] else "غير متوفر"
+            )
+            bot.send_message(call.message.chat.id, speed_message, parse_mode='Markdown')
+        else:
+            bot.send_message(call.message.chat.id, "❌ فشل في فحص السرعة. يرجى المحاولة لاحقًا.")
     elif call.data == 'delete_all_files':
         delete_all_files(call.message.chat.id, call.from_user.id)
     elif call.data == 'stop_all_files':
@@ -320,10 +452,26 @@ def notify_owner(message, file_path=None):
     else:
         bot.send_message(OWNER_ID, message)
 
+# دالة لفحص سرعة البوت بشكل دوري
+def periodic_speed_check():
+    while True:
+        time.sleep(300)  # الانتظار 5 دقائق بين كل فحص
+        check_bot_speed()
+        print(f"✅ تم تحديث سرعة البوت: {bot_speed_info['speed']}")
+
+# بدء فحص السرعة بشكل دوري في خيط منفصل
+speed_check_thread = threading.Thread(target=periodic_speed_check)
+speed_check_thread.daemon = True
+speed_check_thread.start()
+
 # تشغيل البوت مع إعادة المحاولة عند التعطل
 def run_bot():
     while True:
         try:
+            # فحص السرعة الأولي عند بدء التشغيل
+            check_bot_speed()
+            print(f"🚀 بدء تشغيل البوت... السرعة الحالية: {bot_speed_info['speed']}")
+            
             bot.polling(none_stop=True)
         except Exception as e:
             print(f"⚠️ حدث خطأ: {e}. إعادة المحاولة خلال 10 ثوانٍ...")
