@@ -1,4 +1,6 @@
-# المكتبات الأساسية
+# نظام استضافة بوتات تيليجرام الآمن
+# Secure Telegram Bot Hosting System
+
 import telebot
 from telebot import types
 import os
@@ -10,50 +12,546 @@ import sqlite3
 import asyncio
 import psutil
 import threading
+import hashlib
+import base64
+import shutil
+import signal
 from datetime import datetime, timedelta
 from collections import defaultdict
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
-# --- 1. إعدادات البوت ---
-API_TOKEN = '8156912979:AAF7lmavpv_5HJlziXpygqshsGvqW4tOcDc'
-ADMIN_ID = 7627857345  # أنت كأدمن
-REQUIRED_CHANNEL_ID = '@pythonyemen1'
+# ═══════════════════════════════════════════════════════════════════
+# ⚙️ إعدادات البوت الأساسية
+# ═══════════════════════════════════════════════════════════════════
 
-UPLOADED_BOTS_DIR = 'uploaded_bots'
-DATABASE_FILE = 'bot_data.db'
+API_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
+REQUIRED_CHANNEL_ID = os.environ.get("REQUIRED_CHANNEL_ID", "@pythonyemen1")
+ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY", "")
 
-# قيود الاستخدام والموارد
+# مسارات النظام
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+USERS_DIR = os.path.join(BASE_DIR, 'users')
+DATABASE_FILE = os.path.join(BASE_DIR, 'bot_data.db')
+LOGS_DIR = os.path.join(BASE_DIR, 'system_logs')
+
+# حدود الموارد
 MAX_FILE_SIZE_MB = 5
 MAX_BOTS_PER_USER = 3
-RESOURCE_CPU_LIMIT_PERCENT = 80
-RESOURCE_RAM_LIMIT_MB = 200
+RESOURCE_CPU_LIMIT_PERCENT = 70
+RESOURCE_RAM_LIMIT_MB = 150
+RESOURCE_DISK_LIMIT_MB = 50
+MAX_PROCESSES_PER_USER = 10
+NETWORK_LIMIT_MB = 10
 
-# معدلات الأمان
+# إعدادات الأمان
 SECURITY_FAILURE_THRESHOLD = 5
 SECURITY_BAN_DURATION_MINUTES = 30
+MONITOR_INTERVAL_SECONDS = 30
 
-bot = telebot.TeleBot(API_TOKEN)
+# إنشاء المجلدات الأساسية
+os.makedirs(USERS_DIR, exist_ok=True)
+os.makedirs(LOGS_DIR, exist_ok=True)
 
-# --- دالة تهريب الرموز الخاصة ---
-def escape_markdown(text):
-    """تهريب الرموز الخاصة في Markdown"""
-    if not text:
-        return text
+# ═══════════════════════════════════════════════════════════════════
+# 🔐 الطبقة 1: نظام التشفير وحماية التوكنات
+# ═══════════════════════════════════════════════════════════════════
+
+class TokenProtector:
+    """نظام حماية وتشفير التوكنات"""
     
-    escape_chars = r'_*[]()~`>#+-=|{}.!'
-    escaped_text = ''
-    for char in str(text):
-        if char in escape_chars:
-            escaped_text += '\\' + char
+    TELEGRAM_TOKEN_PATTERN = r'\b(\d{9,10}:[A-Za-z0-9_-]{35})\b'
+    FAKE_TOKEN = "PROTECTED_TOKEN:HIDDEN_BY_SECURITY_SYSTEM"
+    
+    def __init__(self, encryption_key=None):
+        if encryption_key:
+            key = self._derive_key(encryption_key)
+            self.fernet = Fernet(key)
         else:
-            escaped_text += char
-    return escaped_text
+            self.fernet = None
+    
+    def _derive_key(self, password: str) -> bytes:
+        """اشتقاق مفتاح تشفير من كلمة مرور"""
+        salt = b'telegram_bot_hosting_salt_2024'
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            iterations=100000,
+        )
+        key = base64.urlsafe_b64encode(kdf.derive(password.encode()))
+        return key
+    
+    def detect_tokens(self, code: str) -> list:
+        """كشف التوكنات في الكود"""
+        tokens = re.findall(self.TELEGRAM_TOKEN_PATTERN, code)
+        return tokens
+    
+    def scan_and_replace(self, code: str) -> tuple:
+        """اكتشاف واستبدال التوكنات بقيم وهمية"""
+        tokens_found = self.detect_tokens(code)
+        modified_code = code
+        
+        for token in tokens_found:
+            modified_code = modified_code.replace(token, self.FAKE_TOKEN)
+        
+        return modified_code, tokens_found
+    
+    def encrypt_token(self, token: str) -> str:
+        """تشفير التوكن باستخدام AES-256"""
+        if not self.fernet:
+            return base64.b64encode(token.encode()).decode()
+        return self.fernet.encrypt(token.encode()).decode()
+    
+    def decrypt_token(self, encrypted_token: str) -> str:
+        """فك تشفير التوكن"""
+        if not self.fernet:
+            return base64.b64decode(encrypted_token.encode()).decode()
+        return self.fernet.decrypt(encrypted_token.encode()).decode()
+    
+    def validate_telegram_token(self, token: str) -> dict:
+        """التحقق من صلاحية توكن تيليجرام وجلب معلومات البوت"""
+        import requests
+        try:
+            response = requests.get(f"https://api.telegram.org/bot{token}/getMe", timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("ok"):
+                    bot_info = data.get("result", {})
+                    return {
+                        "valid": True,
+                        "bot_id": bot_info.get("id"),
+                        "bot_username": bot_info.get("username"),
+                        "bot_name": bot_info.get("first_name"),
+                        "is_bot": bot_info.get("is_bot", False)
+                    }
+            return {"valid": False, "error": "Invalid token"}
+        except Exception as e:
+            return {"valid": False, "error": str(e)}
 
-# --- 2. تهيئة المجلدات وقاعدة البيانات ---
-os.makedirs(UPLOADED_BOTS_DIR, exist_ok=True)
+token_protector = TokenProtector(ENCRYPTION_KEY)
+
+# ═══════════════════════════════════════════════════════════════════
+# 🔍 الطبقة 2: محلل الأكواد الأمني
+# ═══════════════════════════════════════════════════════════════════
+
+class CodeAnalyzer:
+    """محلل الأكواد للكشف عن الأوامر الخطيرة"""
+    
+    FORBIDDEN_PATTERNS = [
+        # أوامر النظام الخطيرة
+        (r'os\.system\s*\(', 'os.system - تنفيذ أوامر shell'),
+        (r'os\.popen\s*\(', 'os.popen - فتح قناة أوامر'),
+        (r'subprocess\.(run|call|Popen|check_output|check_call|getoutput|getstatusoutput)\s*\(', 'subprocess - تنفيذ أوامر'),
+        (r'os\.(exec[vlep]*|spawn[vlep]*)\s*\(', 'os.exec/spawn - تنفيذ عمليات'),
+        (r'os\.(fork|kill|killpg)\s*\(', 'os.fork/kill - إدارة العمليات'),
+        
+        # أوامر التقييم الديناميكية
+        (r'\beval\s*\(', 'eval - تنفيذ كود ديناميكي'),
+        (r'\bexec\s*\(', 'exec - تنفيذ كود ديناميكي'),
+        (r'__import__\s*\(', '__import__ - استيراد ديناميكي'),
+        (r'\bcompile\s*\(', 'compile - تجميع كود'),
+        
+        # الوصول للملفات النظامية
+        (r'open\s*\([^)]*(/etc/|/root/|/home/|/var/|/usr/|/bin/|/sbin/)', 'وصول لملفات نظامية'),
+        (r'(shutil\.rmtree|shutil\.move|shutil\.copy)\s*\([^)]*(/etc/|/root/|/home/|\.\.)', 'تعديل ملفات نظامية'),
+        (r'os\.(remove|unlink|rmdir|removedirs)\s*\([^)]*(/etc/|/root/|/home/|\.\.)', 'حذف ملفات نظامية'),
+        (r'os\.(chmod|chown)\s*\(', 'تغيير صلاحيات'),
+        (r'os\.(link|symlink)\s*\(', 'إنشاء روابط'),
+        
+        # الشبكة الخارجية غير المصرح بها
+        (r'socket\.socket\s*\(', 'socket - اتصال شبكي مباشر'),
+        (r'urllib\.(request|urlopen)', 'urllib - طلبات HTTP'),
+        (r'http\.client\.(HTTPConnection|HTTPSConnection)', 'http.client - اتصال HTTP'),
+        
+        # الوصول للشبكة الداخلية
+        (r'(127\.0\.0\.1|localhost|0\.0\.0\.0)', 'وصول للشبكة الداخلية'),
+        
+        # مكتبات خطيرة
+        (r'import\s+(pty|fcntl|termios|resource|ctypes|mmap)', 'استيراد مكتبات نظام'),
+        (r'from\s+(pty|fcntl|termios|resource|ctypes|mmap)\s+import', 'استيراد من مكتبات نظام'),
+        
+        # تسريب البيانات
+        (r'(globals|locals|vars|dir)\s*\(\s*\)', 'وصول لمتغيرات النظام'),
+        (r'(getattr|setattr|delattr)\s*\([^)]*["\']__', 'وصول لسمات خاصة'),
+        (r'__builtins__|__builtin__', 'وصول للدوال المدمجة'),
+        
+        # أوامر خطيرة أخرى
+        (r'sys\.settrace|sys\.setprofile', 'تتبع التنفيذ'),
+        (r'(pickle|marshal)\.(load|loads|dump|dumps)', 'تسلسل غير آمن'),
+        (r'(setuid|setgid|seteuid|setegid)\s*\(', 'تغيير هوية المستخدم'),
+        
+        # محاولات الهروب من sandbox
+        (r'__class__\.__bases__|__subclasses__', 'محاولة هروب من sandbox'),
+        (r'__mro__|__globals__', 'وصول لسلسلة الوراثة'),
+        
+        # خوادم ويب
+        (r'(flask|django|aiohttp|fastapi|sanic|tornado|cherrypy)\.(run|serve|start)', 'تشغيل خادم ويب'),
+        (r'(socketserver|http\.server|wsgiref)\.(TCPServer|HTTPServer)', 'تشغيل خادم'),
+        
+        # قراءة ملفات حساسة
+        (r'open\s*\([^)]*\.(env|pem|key|crt|ssh|token|secret|password|config)', 'قراءة ملفات حساسة'),
+    ]
+    
+    ALLOWED_IMPORTS = [
+        'telebot', 'telegram', 'pyrogram', 'aiogram',
+        'json', 'datetime', 'time', 'random', 'string',
+        're', 'collections', 'itertools', 'functools',
+        'math', 'statistics', 'decimal', 'fractions',
+        'typing', 'dataclasses', 'enum', 'abc',
+        'logging', 'warnings', 'traceback',
+        'copy', 'pprint', 'textwrap',
+        'html', 'urllib.parse', 'base64',
+        'hashlib', 'hmac', 'secrets',
+        'uuid', 'asyncio', 'threading',
+    ]
+    
+    def __init__(self):
+        self.security_score = 100
+        self.issues = []
+    
+    def analyze(self, code: str) -> dict:
+        """تحليل شامل للكود"""
+        self.security_score = 100
+        self.issues = []
+        
+        # البحث عن الأنماط الخطيرة
+        for pattern, description in self.FORBIDDEN_PATTERNS:
+            matches = re.findall(pattern, code, re.IGNORECASE | re.MULTILINE)
+            if matches:
+                self.security_score -= 20
+                self.issues.append({
+                    'type': 'forbidden_pattern',
+                    'pattern': pattern,
+                    'description': description,
+                    'matches': len(matches)
+                })
+        
+        # التحقق من الاستيرادات
+        imports = re.findall(r'^(?:from\s+(\S+)|import\s+(\S+))', code, re.MULTILINE)
+        for imp in imports:
+            module = imp[0] or imp[1]
+            module_base = module.split('.')[0]
+            if module_base not in self.ALLOWED_IMPORTS and module not in self.ALLOWED_IMPORTS:
+                if module_base not in ['os', 'sys', 'subprocess', 'socket']:
+                    pass  # سماح للمكتبات الأخرى مع تحذير
+        
+        return {
+            'is_safe': len(self.issues) == 0,
+            'security_score': max(0, self.security_score),
+            'issues': self.issues,
+            'issues_count': len(self.issues)
+        }
+    
+    def is_malicious(self, code: str) -> tuple:
+        """فحص سريع للكود الخبيث"""
+        result = self.analyze(code)
+        if not result['is_safe']:
+            return True, result['issues'][0]['description'] if result['issues'] else 'كود مشبوه'
+        return False, None
+
+code_analyzer = CodeAnalyzer()
+
+# ═══════════════════════════════════════════════════════════════════
+# 📦 الطبقة 3: نظام العزل (Sandbox)
+# ═══════════════════════════════════════════════════════════════════
+
+class SandboxManager:
+    """مدير بيئات العزل للمستخدمين"""
+    
+    def __init__(self, base_dir: str):
+        self.base_dir = base_dir
+        os.makedirs(base_dir, exist_ok=True)
+    
+    def create_user_sandbox(self, user_id: int) -> dict:
+        """إنشاء بيئة معزولة للمستخدم"""
+        user_dir = os.path.join(self.base_dir, f"user_{user_id}")
+        
+        # هيكل المجلدات
+        dirs = {
+            'root': user_dir,
+            'bots': os.path.join(user_dir, 'bot_files'),
+            'logs': os.path.join(user_dir, 'logs'),
+            'temp': os.path.join(user_dir, 'temp'),
+            'data': os.path.join(user_dir, 'data'),
+        }
+        
+        # إنشاء المجلدات
+        for dir_path in dirs.values():
+            os.makedirs(dir_path, exist_ok=True)
+        
+        # إنشاء ملف الصلاحيات
+        permissions = {
+            'user_id': user_id,
+            'created_at': datetime.now().isoformat(),
+            'limits': {
+                'max_bots': MAX_BOTS_PER_USER,
+                'max_file_size_mb': MAX_FILE_SIZE_MB,
+                'cpu_limit_percent': RESOURCE_CPU_LIMIT_PERCENT,
+                'ram_limit_mb': RESOURCE_RAM_LIMIT_MB,
+                'disk_limit_mb': RESOURCE_DISK_LIMIT_MB,
+            },
+            'allowed_directories': list(dirs.values()),
+            'denied_paths': ['/etc', '/root', '/home', '/var', '/usr', '/bin', '/sbin', '..'],
+        }
+        
+        permissions_file = os.path.join(user_dir, 'permissions.json')
+        with open(permissions_file, 'w') as f:
+            json.dump(permissions, f, indent=2)
+        
+        return dirs
+    
+    def get_user_sandbox(self, user_id: int) -> dict:
+        """الحصول على مسارات sandbox المستخدم"""
+        user_dir = os.path.join(self.base_dir, f"user_{user_id}")
+        
+        if not os.path.exists(user_dir):
+            return self.create_user_sandbox(user_id)
+        
+        return {
+            'root': user_dir,
+            'bots': os.path.join(user_dir, 'bot_files'),
+            'logs': os.path.join(user_dir, 'logs'),
+            'temp': os.path.join(user_dir, 'temp'),
+            'data': os.path.join(user_dir, 'data'),
+        }
+    
+    def get_user_disk_usage(self, user_id: int) -> float:
+        """حساب استخدام القرص للمستخدم بالـ MB"""
+        user_dir = os.path.join(self.base_dir, f"user_{user_id}")
+        if not os.path.exists(user_dir):
+            return 0.0
+        
+        total_size = 0
+        for dirpath, dirnames, filenames in os.walk(user_dir):
+            for f in filenames:
+                fp = os.path.join(dirpath, f)
+                if os.path.exists(fp):
+                    total_size += os.path.getsize(fp)
+        
+        return total_size / (1024 * 1024)
+    
+    def cleanup_user_temp(self, user_id: int):
+        """تنظيف الملفات المؤقتة للمستخدم"""
+        sandbox = self.get_user_sandbox(user_id)
+        temp_dir = sandbox['temp']
+        
+        if os.path.exists(temp_dir):
+            for item in os.listdir(temp_dir):
+                item_path = os.path.join(temp_dir, item)
+                try:
+                    if os.path.isfile(item_path):
+                        os.remove(item_path)
+                    elif os.path.isdir(item_path):
+                        shutil.rmtree(item_path)
+                except Exception:
+                    pass
+    
+    def delete_user_sandbox(self, user_id: int):
+        """حذف sandbox المستخدم بالكامل"""
+        user_dir = os.path.join(self.base_dir, f"user_{user_id}")
+        if os.path.exists(user_dir):
+            shutil.rmtree(user_dir)
+
+sandbox_manager = SandboxManager(USERS_DIR)
+
+# ═══════════════════════════════════════════════════════════════════
+# 📊 الطبقة 4: نظام مراقبة الموارد
+# ═══════════════════════════════════════════════════════════════════
+
+class ResourceMonitor:
+    """مراقب موارد البوتات في الوقت الحقيقي"""
+    
+    LIMITS = {
+        'cpu_percent': RESOURCE_CPU_LIMIT_PERCENT,
+        'ram_mb': RESOURCE_RAM_LIMIT_MB,
+        'disk_mb': RESOURCE_DISK_LIMIT_MB,
+        'processes': MAX_PROCESSES_PER_USER,
+    }
+    
+    def __init__(self):
+        self.monitored_processes = {}
+        self.alerts = []
+        self.is_running = False
+    
+    def add_process(self, filename: str, pid: int, user_id: int):
+        """إضافة عملية للمراقبة"""
+        self.monitored_processes[filename] = {
+            'pid': pid,
+            'user_id': user_id,
+            'started_at': datetime.now(),
+            'violations': 0,
+            'last_check': None,
+        }
+    
+    def remove_process(self, filename: str):
+        """إزالة عملية من المراقبة"""
+        if filename in self.monitored_processes:
+            del self.monitored_processes[filename]
+    
+    def check_process(self, filename: str) -> dict:
+        """فحص موارد عملية معينة"""
+        if filename not in self.monitored_processes:
+            return {'status': 'not_found'}
+        
+        proc_info = self.monitored_processes[filename]
+        pid = proc_info['pid']
+        
+        try:
+            if not psutil.pid_exists(pid):
+                return {'status': 'stopped', 'reason': 'Process not found'}
+            
+            process = psutil.Process(pid)
+            
+            # جمع المعلومات
+            cpu_percent = process.cpu_percent(interval=0.1)
+            memory_info = process.memory_info()
+            ram_mb = memory_info.rss / (1024 * 1024)
+            
+            # التحقق من التجاوزات
+            violations = []
+            
+            if cpu_percent > self.LIMITS['cpu_percent']:
+                violations.append(f"CPU: {cpu_percent:.1f}% > {self.LIMITS['cpu_percent']}%")
+            
+            if ram_mb > self.LIMITS['ram_mb']:
+                violations.append(f"RAM: {ram_mb:.1f}MB > {self.LIMITS['ram_mb']}MB")
+            
+            proc_info['last_check'] = datetime.now()
+            
+            return {
+                'status': 'running',
+                'cpu_percent': cpu_percent,
+                'ram_mb': ram_mb,
+                'violations': violations,
+                'should_kill': len(violations) > 0,
+            }
+            
+        except psutil.NoSuchProcess:
+            return {'status': 'stopped', 'reason': 'Process terminated'}
+        except Exception as e:
+            return {'status': 'error', 'reason': str(e)}
+    
+    def kill_if_exceeded(self, filename: str) -> tuple:
+        """إيقاف العملية إذا تجاوزت الحدود"""
+        check_result = self.check_process(filename)
+        
+        if check_result.get('should_kill'):
+            proc_info = self.monitored_processes.get(filename)
+            if proc_info:
+                try:
+                    pid = proc_info['pid']
+                    if psutil.pid_exists(pid):
+                        process = psutil.Process(pid)
+                        process.terminate()
+                        process.wait(timeout=5)
+                        if process.is_running():
+                            process.kill()
+                    
+                    self.remove_process(filename)
+                    return True, check_result['violations']
+                except Exception as e:
+                    return False, [str(e)]
+        
+        return False, []
+    
+    def get_system_stats(self) -> dict:
+        """إحصائيات النظام الكلية"""
+        return {
+            'cpu_percent': psutil.cpu_percent(interval=0.1),
+            'ram_percent': psutil.virtual_memory().percent,
+            'ram_used_mb': psutil.virtual_memory().used / (1024 * 1024),
+            'ram_total_mb': psutil.virtual_memory().total / (1024 * 1024),
+            'disk_percent': psutil.disk_usage('/').percent,
+            'active_processes': len(self.monitored_processes),
+        }
+
+resource_monitor = ResourceMonitor()
+
+# ═══════════════════════════════════════════════════════════════════
+# 📝 الطبقة 5: نظام التسجيل والمراقبة
+# ═══════════════════════════════════════════════════════════════════
+
+class ActivityLogger:
+    """نظام تسجيل النشاطات والتنبيهات الأمنية"""
+    
+    def __init__(self, log_dir: str):
+        self.log_dir = log_dir
+        os.makedirs(log_dir, exist_ok=True)
+    
+    def log(self, level: str, user_id: int, action: str, details: str = ""):
+        """تسجيل نشاط"""
+        timestamp = datetime.now().isoformat()
+        log_entry = {
+            'timestamp': timestamp,
+            'level': level,
+            'user_id': user_id,
+            'action': action,
+            'details': details,
+        }
+        
+        # حفظ في ملف يومي
+        log_file = os.path.join(self.log_dir, f"log_{datetime.now().strftime('%Y-%m-%d')}.json")
+        
+        try:
+            if os.path.exists(log_file):
+                with open(log_file, 'r') as f:
+                    logs = json.load(f)
+            else:
+                logs = []
+            
+            logs.append(log_entry)
+            
+            with open(log_file, 'w') as f:
+                json.dump(logs, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+    
+    def security_alert(self, user_id: int, alert_type: str, details: str):
+        """تنبيه أمني"""
+        self.log('SECURITY', user_id, alert_type, details)
+    
+    def activity(self, user_id: int, action: str, details: str = ""):
+        """تسجيل نشاط عادي"""
+        self.log('INFO', user_id, action, details)
+    
+    def error(self, user_id: int, action: str, error: str):
+        """تسجيل خطأ"""
+        self.log('ERROR', user_id, action, error)
+    
+    def get_recent_logs(self, limit: int = 50, level: str = None) -> list:
+        """جلب آخر السجلات"""
+        all_logs = []
+        
+        log_files = sorted([f for f in os.listdir(self.log_dir) if f.startswith('log_')], reverse=True)
+        
+        for log_file in log_files[:7]:  # آخر 7 أيام
+            try:
+                with open(os.path.join(self.log_dir, log_file), 'r') as f:
+                    logs = json.load(f)
+                    if level:
+                        logs = [l for l in logs if l.get('level') == level]
+                    all_logs.extend(logs)
+            except Exception:
+                pass
+        
+        all_logs.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+        return all_logs[:limit]
+
+activity_logger = ActivityLogger(LOGS_DIR)
+
+# ═══════════════════════════════════════════════════════════════════
+# 🗄️ قاعدة البيانات
+# ═══════════════════════════════════════════════════════════════════
 
 def init_db():
+    """تهيئة قاعدة البيانات"""
     conn = sqlite3.connect(DATABASE_FILE)
     cursor = conn.cursor()
+    
+    # جدول المستخدمين
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -61,32 +559,48 @@ def init_db():
             is_banned INTEGER DEFAULT 0,
             ban_reason TEXT,
             ban_timestamp TEXT,
-            temp_ban_until TEXT
+            temp_ban_until TEXT,
+            security_score INTEGER DEFAULT 100,
+            total_uploads INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    
+    # جدول البوتات المستضافة
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS hosted_bots (
             bot_id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
             filename TEXT UNIQUE,
+            bot_token_encrypted TEXT,
+            bot_username TEXT,
+            bot_name TEXT,
             status TEXT DEFAULT 'stopped',
             process_pid INTEGER,
             last_started TEXT,
             last_stopped TEXT,
             start_count INTEGER DEFAULT 0,
             error_log TEXT,
+            cpu_usage REAL DEFAULT 0,
+            ram_usage REAL DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users (user_id)
         )
     ''')
+    
+    # جدول سجلات الأمان
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS security_logs (
             log_id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
             user_id INTEGER,
             action TEXT,
+            severity TEXT DEFAULT 'INFO',
             details TEXT
         )
     ''')
+    
+    # جدول سجلات النشاط
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS activity_logs (
             log_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,16 +610,26 @@ def init_db():
             details TEXT
         )
     ''')
+    
+    # جدول التوكنات المشفرة
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS encrypted_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            filename TEXT,
+            original_token_hash TEXT,
+            encrypted_token TEXT,
+            bot_username TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, filename)
+        )
+    ''')
+    
     conn.commit()
     conn.close()
 
-# --- 3. قواميس لتتبع الحالات ---
-user_states = {}
-running_processes = {}
-security_failures = defaultdict(lambda: {'count': 0, 'last_failure': None})
-
-# --- 4. وظائف قاعدة البيانات ---
 def db_execute(query, params=(), fetch_one=False, fetch_all=False, commit=False):
+    """تنفيذ استعلام على قاعدة البيانات"""
     conn = sqlite3.connect(DATABASE_FILE)
     cursor = conn.cursor()
     try:
@@ -122,89 +646,158 @@ def db_execute(query, params=(), fetch_one=False, fetch_all=False, commit=False)
     finally:
         conn.close()
 
+# ═══════════════════════════════════════════════════════════════════
+# 🔧 وظائف المساعدة
+# ═══════════════════════════════════════════════════════════════════
+
+# قواميس التتبع
+user_states = {}
+running_processes = {}
+security_failures = defaultdict(lambda: {'count': 0, 'last_failure': None})
+
+def escape_markdown(text):
+    """تهريب الرموز الخاصة في Markdown"""
+    if not text:
+        return text
+    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    escaped_text = ''
+    for char in str(text):
+        if char in escape_chars:
+            escaped_text += '\\' + char
+        else:
+            escaped_text += char
+    return escaped_text
+
+def is_admin(user_id):
+    """التحقق من صلاحيات المطور"""
+    return user_id == ADMIN_ID
+
 def get_user_data(user_id):
-    result = db_execute("SELECT user_id, username, is_banned, ban_reason, temp_ban_until FROM users WHERE user_id = ?", (user_id,), fetch_one=True)
+    """جلب بيانات المستخدم"""
+    result = db_execute(
+        "SELECT user_id, username, is_banned, ban_reason, temp_ban_until, security_score FROM users WHERE user_id = ?",
+        (user_id,), fetch_one=True
+    )
     if result:
         return {
             'user_id': result[0],
             'username': result[1],
             'is_banned': bool(result[2]),
             'ban_reason': result[3],
-            'temp_ban_until': datetime.strptime(result[4], '%Y-%m-%d %H:%M:%S') if result[4] else None
+            'temp_ban_until': datetime.strptime(result[4], '%Y-%m-%d %H:%M:%S') if result[4] else None,
+            'security_score': result[5],
         }
     return None
 
 def register_user(user_id, username):
-    db_execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (user_id, username), commit=True)
+    """تسجيل مستخدم جديد"""
+    db_execute(
+        "INSERT OR IGNORE INTO users (user_id, username, created_at) VALUES (?, ?, ?)",
+        (user_id, username, datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
+        commit=True
+    )
+    # إنشاء sandbox للمستخدم
+    sandbox_manager.create_user_sandbox(user_id)
 
 def ban_user_db(user_id, reason="Generic ban", is_temp=False, duration_minutes=None):
+    """حظر مستخدم"""
     if is_temp and duration_minutes:
         ban_until = datetime.now() + timedelta(minutes=duration_minutes)
-        db_execute("UPDATE users SET is_banned = 1, ban_reason = ?, ban_timestamp = ?, temp_ban_until = ? WHERE user_id = ?",
-                   (reason, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), ban_until.strftime('%Y-%m-%d %H:%M:%S'), user_id), commit=True)
+        db_execute(
+            "UPDATE users SET is_banned = 1, ban_reason = ?, ban_timestamp = ?, temp_ban_until = ? WHERE user_id = ?",
+            (reason, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), ban_until.strftime('%Y-%m-%d %H:%M:%S'), user_id),
+            commit=True
+        )
     else:
-        db_execute("UPDATE users SET is_banned = 1, ban_reason = ?, ban_timestamp = ?, temp_ban_until = NULL WHERE user_id = ?",
-                   (reason, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), user_id), commit=True)
+        db_execute(
+            "UPDATE users SET is_banned = 1, ban_reason = ?, ban_timestamp = ?, temp_ban_until = NULL WHERE user_id = ?",
+            (reason, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), user_id),
+            commit=True
+        )
 
 def unban_user_db(user_id):
-    return db_execute("UPDATE users SET is_banned = 0, ban_reason = NULL, ban_timestamp = NULL, temp_ban_until = NULL WHERE user_id = ?", (user_id,), commit=True)
+    """فك حظر مستخدم"""
+    return db_execute(
+        "UPDATE users SET is_banned = 0, ban_reason = NULL, ban_timestamp = NULL, temp_ban_until = NULL WHERE user_id = ?",
+        (user_id,), commit=True
+    )
 
 def get_banned_users_db():
-    return db_execute("SELECT user_id, username, ban_reason, temp_ban_until FROM users WHERE is_banned = 1", fetch_all=True)
+    """جلب قائمة المحظورين"""
+    return db_execute(
+        "SELECT user_id, username, ban_reason, temp_ban_until FROM users WHERE is_banned = 1",
+        fetch_all=True
+    )
 
-def add_hosted_bot_db(user_id, filename, pid=None, status='running'):
-    db_execute("INSERT OR REPLACE INTO hosted_bots (user_id, filename, status, process_pid, last_started, start_count) VALUES (?, ?, ?, ?, ?, COALESCE((SELECT start_count FROM hosted_bots WHERE filename = ?), 0) + 1)",
-               (user_id, filename, status, pid, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), filename), commit=True)
+def add_hosted_bot_db(user_id, filename, pid=None, status='running', bot_username=None, bot_name=None, encrypted_token=None):
+    """إضافة بوت مستضاف"""
+    db_execute(
+        """INSERT OR REPLACE INTO hosted_bots 
+           (user_id, filename, status, process_pid, bot_username, bot_name, bot_token_encrypted, last_started, start_count) 
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT start_count FROM hosted_bots WHERE filename = ?), 0) + 1)""",
+        (user_id, filename, status, pid, bot_username, bot_name, encrypted_token,
+         datetime.now().strftime('%Y-%m-%d %H:%M:%S'), filename),
+        commit=True
+    )
 
 def update_hosted_bot_status_db(filename, status, pid=None, error_log=None):
+    """تحديث حالة البوت"""
     if pid:
-        db_execute("UPDATE hosted_bots SET status = ?, process_pid = ?, error_log = NULL WHERE filename = ?", (status, pid, filename), commit=True)
+        db_execute(
+            "UPDATE hosted_bots SET status = ?, process_pid = ?, error_log = NULL WHERE filename = ?",
+            (status, pid, filename), commit=True
+        )
     else:
-        db_execute("UPDATE hosted_bots SET status = ?, process_pid = NULL, last_stopped = ?, error_log = ? WHERE filename = ?",
-                   (status, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), error_log, filename), commit=True)
+        db_execute(
+            "UPDATE hosted_bots SET status = ?, process_pid = NULL, last_stopped = ?, error_log = ? WHERE filename = ?",
+            (status, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), error_log, filename),
+            commit=True
+        )
 
 def delete_hosted_bot_db(filename):
+    """حذف بوت من قاعدة البيانات"""
     db_execute("DELETE FROM hosted_bots WHERE filename = ?", (filename,), commit=True)
 
 def get_all_hosted_bots_db(user_id=None):
+    """جلب جميع البوتات المستضافة"""
     if user_id:
-        return db_execute("SELECT filename, status, user_id, process_pid, last_started, start_count FROM hosted_bots WHERE user_id = ?", (user_id,), fetch_all=True)
-    return db_execute("SELECT filename, status, user_id, process_pid, last_started, start_count FROM hosted_bots", fetch_all=True)
+        return db_execute(
+            """SELECT filename, status, user_id, process_pid, last_started, start_count, bot_username, bot_name 
+               FROM hosted_bots WHERE user_id = ?""",
+            (user_id,), fetch_all=True
+        )
+    return db_execute(
+        """SELECT filename, status, user_id, process_pid, last_started, start_count, bot_username, bot_name 
+           FROM hosted_bots""",
+        fetch_all=True
+    )
 
 def get_user_bot_count(user_id):
-    result = db_execute("SELECT COUNT(*) FROM hosted_bots WHERE user_id = ? AND status = 'running'", (user_id,), fetch_one=True)
+    """عدد بوتات المستخدم"""
+    result = db_execute(
+        "SELECT COUNT(*) FROM hosted_bots WHERE user_id = ?",
+        (user_id,), fetch_one=True
+    )
     return result[0] if result else 0
 
-def add_security_log(user_id, action, details):
-    db_execute("INSERT INTO security_logs (user_id, action, details) VALUES (?, ?, ?)", (user_id, action, details), commit=True)
+def add_security_log(user_id, action, details, severity='WARNING'):
+    """إضافة سجل أمني"""
+    db_execute(
+        "INSERT INTO security_logs (user_id, action, details, severity) VALUES (?, ?, ?, ?)",
+        (user_id, action, details, severity), commit=True
+    )
+    activity_logger.security_alert(user_id, action, details)
 
 def add_activity_log(user_id, action, details):
-    db_execute("INSERT INTO activity_logs (user_id, action, details) VALUES (?, ?, ?)", (user_id, action, details), commit=True)
-
-# --- 5. وظائف المساعدة والأمان ---
-def is_admin(user_id):
-    return user_id == ADMIN_ID
-
-def is_subscribed(user_id, channel_id_str):
-    try:
-        member = bot.get_chat_member(channel_id_str, user_id)
-        return member.status in ['member', 'administrator', 'creator']
-    except telebot.apihelper.ApiTelegramException as e:
-        if "Bad Request: user not found" in str(e):
-             return False
-        elif "Bad Request: chat not found" in str(e) or "Bad Request: CHANNEL_INVALID" in str(e):
-            print(f"Error: Channel ID '{channel_id_str}' might be invalid or bot is not in it. Error: {e}")
-            if is_admin(user_id):
-                bot.send_message(ADMIN_ID, f"⚠️ تنبيه مطور - خطأ في القناة: معرف القناة {channel_id_str} غير صالح أو البوت ليس عضواً فيه")
-            return False
-        else:
-            print(f"An unexpected error occurred while checking subscription for user {user_id}: {e}")
-            return False
-    except Exception as e:
-        print(f"An unexpected error occurred while checking subscription for user {user_id}: {e}")
-        return False
+    """إضافة سجل نشاط"""
+    db_execute(
+        "INSERT INTO activity_logs (user_id, action, details) VALUES (?, ?, ?)",
+        (user_id, action, details), commit=True
+    )
+    activity_logger.activity(user_id, action, details)
 
 def terminate_process(filename):
+    """إيقاف عملية بوت"""
     if filename in running_processes and running_processes[filename] is not None:
         try:
             process = running_processes[filename]
@@ -216,19 +809,23 @@ def terminate_process(filename):
                     p.kill()
             
             del running_processes[filename]
+            resource_monitor.remove_process(filename)
             update_hosted_bot_status_db(filename, 'stopped')
             return True
         except psutil.NoSuchProcess:
-            print(f"Process for {filename} (PID: {process.pid}) no longer exists. Already stopped.")
             if filename in running_processes:
                 del running_processes[filename]
+            resource_monitor.remove_process(filename)
             update_hosted_bot_status_db(filename, 'stopped')
             return True
         except Exception as e:
             print(f"Error terminating process for {filename}: {e}")
             return False
     
-    bot_info = db_execute("SELECT process_pid, status FROM hosted_bots WHERE filename = ?", (filename,), fetch_one=True)
+    bot_info = db_execute(
+        "SELECT process_pid, status FROM hosted_bots WHERE filename = ?",
+        (filename,), fetch_one=True
+    )
     if bot_info and bot_info[1] == 'running' and bot_info[0] and psutil.pid_exists(bot_info[0]):
         try:
             p = psutil.Process(bot_info[0])
@@ -236,6 +833,7 @@ def terminate_process(filename):
             p.wait(timeout=5)
             if p.is_running():
                 p.kill()
+            resource_monitor.remove_process(filename)
             update_hosted_bot_status_db(filename, 'stopped')
             return True
         except psutil.NoSuchProcess:
@@ -246,862 +844,981 @@ def terminate_process(filename):
             return False
     return False
 
-def analyze_for_malicious_code(file_path):
-    malicious_patterns = [
-        r'import\s+(os|subprocess|sys|shutil|socket|requests|urllib|webbrowser|json|pickle|base64|marshal|pty|asyncio|threading|ctypes|inspect|code|gc|sqlite3|mysql|psycopg2|paramiko|pwn|pwntools|fabric|setproctitle|resource|dlfcn|asyncio)',
-        r'(subprocess\.(run|call|Popen|check_output|check_call|getoutput|getstatusoutput)|os\.(system|popen|exec|fork|kill|remove|unlink|rmdir|makedirs|chown|chmod))',
-        r'eval\(|exec\(|__import__\s*\(',
-        r'(getattr|setattr|delattr)\(|\b(globals|locals|vars)\s*\(',
-        r'compile\(',
-        r'open\s*\(".*?(token|password|config|creds|secret|ssh|key|pem|env|wallet|private_key|api_key|database|db_url).*?"',
-        r'(requests\.(get|post|put|delete|head|options|patch)|urllib\.request\.(urlopen|Request))\s*\(.*?url\s*=\s*["\']?http[s]?://',
-        r'\.(send|recv|connect|bind|listen|accept)\(',
-        r'(exit|quit|sys\.exit)\s*\(|raise\s+(SystemExit|KeyboardInterrupt)',
-        r'daemon\s*=\s*True',
-        r'__file__\s*=\s*.*?__import__',
-        r'(bot\.run|client\.run|app\.run)\(',
-        r'(flask|django|aiohttp|fastapi|sanic|cherrypy|tornado)\.',
-        r'cryptography\.|hashlib\.',
-        r'shutil\.rmtree',
-        r'json\.load\(.*?open\(',
-        r'requests\.sessions\.Session',
-        r'platform\.(system|machine|processor|version|node|uname)',
-        r'socket\.gethostname|getpass\.getuser',
-        r'psutil\.(cpu|memory|disk|net|process|users|boot_time)',
-        r'telebot\.send_message\(.*?chat_id=(?!' + str(ADMIN_ID) + r')',
-        r'telebot\.apihelper\.proxy',
-        r'base64\.b64decode|zlib\.decompress|binascii\.unhexlify',
-        r'execv|execle|execlp',
-        r'asyncio\.create_task\(.*?send_message',
-        r'input\(',
-        r'open\s*\(.*?,\s*["\']a["\']\)',
-        r're\.compile\(.*?\.?import',
-        r'sys\.settrace|sys\.setprofile',
-        r'subprocess\.PIPE\s*,\s*subprocess\.STDOUT',
-        r'socketserver\.|http\.server\.|wsgiref\.simple_server\.',
-        r'secrets\.',
-        r'uuid\.',
-        r'random\.',
-        r'time\.sleep\(.*?\d{2,}\)',
-        r'__builtin__|__builtins__',
-        r'mmap\.',
-        r'tempfile\.',
-        r'os\.chmod',
-        r'os\.chown',
-        r'os\.link|os\.symlink',
-    ]
+# ═══════════════════════════════════════════════════════════════════
+# 🤖 إنشاء البوت
+# ═══════════════════════════════════════════════════════════════════
 
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-        content = f.read()
+if not API_TOKEN:
+    print("خطأ: يرجى تعيين TELEGRAM_BOT_TOKEN في متغيرات البيئة")
+    exit(1)
+
+bot = telebot.TeleBot(API_TOKEN)
+
+def is_subscribed(user_id, channel_id_str):
+    """التحقق من الاشتراك في القناة"""
+    try:
+        member = bot.get_chat_member(channel_id_str, user_id)
+        return member.status in ['member', 'administrator', 'creator']
+    except telebot.apihelper.ApiTelegramException as e:
+        if "Bad Request: user not found" in str(e):
+            return False
+        elif "Bad Request: chat not found" in str(e) or "Bad Request: CHANNEL_INVALID" in str(e):
+            print(f"Error: Channel ID '{channel_id_str}' might be invalid")
+            return False
+        else:
+            print(f"Error checking subscription: {e}")
+            return False
+    except Exception as e:
+        print(f"Error checking subscription: {e}")
+        return False
+
+# ═══════════════════════════════════════════════════════════════════
+# 📤 معالجة رفع الملفات مع الحماية الكاملة
+# ═══════════════════════════════════════════════════════════════════
+
+def process_uploaded_file(message, file_content: bytes, filename: str, user_id: int):
+    """معالجة الملف المرفوع مع جميع طبقات الأمان"""
+    
+    code = file_content.decode('utf-8', errors='ignore')
+    
+    # الخطوة 1: كشف التوكنات
+    detected_tokens = token_protector.detect_tokens(code)
+    
+    if not detected_tokens:
+        bot.send_message(
+            message.chat.id,
+            "❌ لم يتم العثور على توكن بوت تيليجرام في الملف!\n\n"
+            "يجب أن يحتوي الملف على توكن بوت صالح.\n"
+            "مثال: 1234567890:ABCdefGHIjklMNOpqrsTUVwxyz123456789"
+        )
+        add_security_log(user_id, "no_token_found", f"File: {filename}")
+        return False
+    
+    # الخطوة 2: التحقق من صلاحية التوكن
+    token = detected_tokens[0]
+    token_info = token_protector.validate_telegram_token(token)
+    
+    if not token_info['valid']:
+        bot.send_message(
+            message.chat.id,
+            f"❌ التوكن الموجود في الملف غير صالح!\n\n"
+            f"خطأ: {token_info.get('error', 'غير معروف')}\n\n"
+            "يرجى التأكد من صحة التوكن وإعادة المحاولة."
+        )
+        add_security_log(user_id, "invalid_token", f"File: {filename}")
+        return False
+    
+    if not token_info.get('is_bot'):
+        bot.send_message(
+            message.chat.id,
+            "❌ التوكن المقدم ليس لبوت تيليجرام!\n"
+            "يرجى استخدام توكن بوت صالح من @BotFather"
+        )
+        add_security_log(user_id, "not_a_bot_token", f"File: {filename}")
+        return False
+    
+    bot_username = token_info.get('bot_username', 'Unknown')
+    bot_name = token_info.get('bot_name', 'Unknown')
+    
+    # الخطوة 3: فحص الكود للأوامر الخطيرة
+    is_malicious, malicious_reason = code_analyzer.is_malicious(code)
+    
+    if is_malicious:
+        ban_user_db(user_id, f"Malicious code: {malicious_reason}", is_temp=True, duration_minutes=SECURITY_BAN_DURATION_MINUTES)
+        add_security_log(user_id, "malicious_code_detected", f"File: {filename}, Reason: {malicious_reason}", severity='CRITICAL')
         
-        if re.search(r'[\w-]{30,}:[\w-]{30,}', content):
-            bot.send_message(ADMIN_ID, f"🔐 تنبيه أمني - توكن بوت: تم رفع ملف {os.path.basename(file_path)} وقد يحتوي على توكن بوت داخله")
-
-        for pattern in malicious_patterns:
-            if re.search(pattern, content, re.IGNORECASE | re.DOTALL):
-                return True, pattern
-    return False, None
-
-# --- 6. وظائف مراقبة الموارد ---
-async def monitor_bot_resources():
-    while True:
-        await asyncio.sleep(60)
-        bots_to_stop = []
-        for filename in list(running_processes.keys()):
-            process_obj = running_processes.get(filename)
-            if not process_obj: continue
+        security_failures[user_id]['count'] += 1
+        security_failures[user_id]['last_failure'] = datetime.now()
+        
+        bot.send_message(
+            message.chat.id,
+            f"🚫 تم اكتشاف كود خطير في ملفك!\n\n"
+            f"السبب: {malicious_reason}\n\n"
+            f"تم حظرك مؤقتاً لمدة {SECURITY_BAN_DURATION_MINUTES} دقيقة.\n"
+            "يرجى التواصل مع المطور إذا كنت تعتقد أن هذا خطأ."
+        )
+        
+        if ADMIN_ID:
+            bot.send_message(
+                ADMIN_ID,
+                f"🚨 تنبيه أمني - كود خبيث\n\n"
+                f"المستخدم: {user_id}\n"
+                f"الملف: {filename}\n"
+                f"السبب: {malicious_reason}"
+            )
+        
+        if security_failures[user_id]['count'] >= SECURITY_FAILURE_THRESHOLD:
+            ban_user_db(user_id, f"Repeated security violations", is_temp=False)
+            bot.send_message(user_id, "🚫 تم حظرك بشكل دائم بسبب تكرار انتهاكات الأمان.")
+        
+        return False
+    
+    # الخطوة 4: تشفير التوكن وحفظه
+    encrypted_token = token_protector.encrypt_token(token)
+    token_hash = hashlib.sha256(token.encode()).hexdigest()[:16]
+    
+    # حفظ التوكن المشفر في قاعدة البيانات
+    db_execute(
+        """INSERT OR REPLACE INTO encrypted_tokens 
+           (user_id, filename, original_token_hash, encrypted_token, bot_username) 
+           VALUES (?, ?, ?, ?, ?)""",
+        (user_id, filename, token_hash, encrypted_token, bot_username),
+        commit=True
+    )
+    
+    # الخطوة 5: حفظ الملف في sandbox المستخدم
+    sandbox = sandbox_manager.get_user_sandbox(user_id)
+    file_path = os.path.join(sandbox['bots'], filename)
+    
+    # التحقق من استخدام القرص
+    disk_usage = sandbox_manager.get_user_disk_usage(user_id)
+    if disk_usage + (len(file_content) / (1024 * 1024)) > RESOURCE_DISK_LIMIT_MB:
+        bot.send_message(
+            message.chat.id,
+            f"❌ تجاوزت الحد المسموح لمساحة التخزين ({RESOURCE_DISK_LIMIT_MB}MB)!\n"
+            "يرجى حذف بعض البوتات القديمة."
+        )
+        return False
+    
+    # حفظ الملف
+    with open(file_path, 'wb') as f:
+        f.write(file_content)
+    
+    # الخطوة 6: تشغيل البوت
+    try:
+        bot_stdout = os.path.join(sandbox['logs'], f"{filename}.stdout")
+        bot_stderr = os.path.join(sandbox['logs'], f"{filename}.stderr")
+        
+        with open(bot_stdout, 'w') as stdout_file, open(bot_stderr, 'w') as stderr_file:
+            process = subprocess.Popen(
+                ['python3', file_path],
+                cwd=sandbox['bots'],
+                stdout=stdout_file,
+                stderr=stderr_file,
+                close_fds=True,
+                start_new_session=True
+            )
             
-            try:
-                if process_obj.poll() is not None:
-                    print(f"Process for {filename} has stopped unexpectedly. Updating status.")
-                    stderr_output = ""
-                    update_hosted_bot_status_db(filename, 'error', error_log=f"Process stopped unexpectedly. Output: {stderr_output[:1000]}")
-                    bot_data = db_execute("SELECT user_id FROM hosted_bots WHERE filename = ?", (filename,), fetch_one=True)
-                    user_id_bot_owner = bot_data[0] if bot_data else "Unknown"
-                    if user_id_bot_owner != "Unknown":
-                        bot.send_message(user_id_bot_owner, f"عذراً، البوت الخاص بك {filename} توقف بشكل غير متوقع. يرجى التحقق من الكود.")
-
-                    if stderr_output:
-                        bot.send_message(ADMIN_ID, f"⚠️ تنبيه مطور - بوت توقف: البوت {filename} توقف بشكل غير متوقع")
-                    del running_processes[filename]
-                    continue
-
-                process_psutil = psutil.Process(process_obj.pid)
-                cpu_percent = process_psutil.cpu_percent(interval=None)
-                memory_info = process_psutil.memory_info()
-                ram_mb = memory_info.rss / (1024 * 1024)
-
-                if cpu_percent > RESOURCE_CPU_LIMIT_PERCENT:
-                    bots_to_stop.append((filename, f"تجاوز حد استخدام CPU: {cpu_percent:.2f}%", process_obj.pid))
-                elif ram_mb > RESOURCE_RAM_LIMIT_MB:
-                    bots_to_stop.append((filename, f"تجاوز حد استخدام RAM: {ram_mb:.2f}MB", process_obj.pid))
-
-            except psutil.NoSuchProcess:
-                print(f"Process for {filename} not found by psutil. Likely already stopped.")
-                update_hosted_bot_status_db(filename, 'stopped', error_log="Process not found by monitor")
+            running_processes[filename] = process
+            resource_monitor.add_process(filename, process.pid, user_id)
+            add_hosted_bot_db(user_id, filename, process.pid, 'running', bot_username, bot_name, encrypted_token)
+            
+            time.sleep(3)
+            
+            if process.poll() is None:
+                bot.send_message(
+                    message.chat.id,
+                    f"✅ تم استضافة البوت بنجاح!\n\n"
+                    f"📁 الملف: {filename}\n"
+                    f"🤖 اسم البوت: {bot_name}\n"
+                    f"👤 يوزر البوت: @{bot_username}\n"
+                    f"🔒 التوكن: محمي ومشفر\n\n"
+                    f"البوت يعمل الآن بشكل دائم!"
+                )
+                add_activity_log(user_id, "bot_started", f"File: {filename}, Bot: @{bot_username}")
+                
+                if ADMIN_ID:
+                    bot.send_message(
+                        ADMIN_ID,
+                        f"📤 بوت جديد مستضاف\n\n"
+                        f"المستخدم: {user_id}\n"
+                        f"الملف: {filename}\n"
+                        f"البوت: @{bot_username}"
+                    )
+                
+                return True
+            else:
+                with open(bot_stderr, 'r') as err_f:
+                    stderr_output = err_f.read().strip()
+                
+                bot.send_message(
+                    message.chat.id,
+                    f"❌ حدث خطأ أثناء تشغيل البوت:\n\n{stderr_output[:500]}..."
+                )
+                update_hosted_bot_status_db(filename, 'error', error_log=stderr_output[:1000])
+                
                 if filename in running_processes:
                     del running_processes[filename]
-            except Exception as e:
-                print(f"Error monitoring {filename}: {e}")
-                bot.send_message(ADMIN_ID, f"⚠️ تنبيه مطور - خطأ مراقبة: حدث خطأ أثناء مراقبة البوت {filename}")
+                resource_monitor.remove_process(filename)
+                
+                return False
+                
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ خطأ غير متوقع: {e}")
+        add_security_log(user_id, "bot_start_error", str(e))
+        return False
 
-        for filename, reason, pid in bots_to_stop:
-            bot_data = db_execute("SELECT user_id FROM hosted_bots WHERE filename = ?", (filename,), fetch_one=True)
-            user_id = bot_data[0] if bot_data else "Unknown"
-            
-            try:
-                if psutil.pid_exists(pid):
-                    p = psutil.Process(pid)
-                    p.terminate()
-                    p.wait(timeout=5)
-                    if p.is_running():
-                        p.kill()
-                    if filename in running_processes:
-                        del running_processes[filename]
-                    update_hosted_bot_status_db(filename, 'stopped', error_log=reason)
-            except psutil.NoSuchProcess:
-                print(f"Process {pid} for {filename} not found during termination.")
-                update_hosted_bot_status_db(filename, 'stopped', error_log=reason)
-            except Exception as e:
-                print(f"Error forcefully stopping {filename} (PID: {pid}): {e}")
-                bot.send_message(ADMIN_ID, f"⚠️ تحذير أمني - فشل إيقاف البوت: فشل إيقاف البوت {filename} تلقائياً بسبب تجاوز الموارد")
+# ═══════════════════════════════════════════════════════════════════
+# 🎮 أوامر المستخدمين
+# ═══════════════════════════════════════════════════════════════════
 
-            ban_user_db(user_id, f"Resource abuse: {reason}", is_temp=True, duration_minutes=SECURITY_BAN_DURATION_MINUTES)
-            add_security_log(user_id, "resource_abuse", f"Filename: {filename}, Reason: {reason}, PID: {pid}")
-            
-            bot.send_message(user_id, f"عذرًا، تم إيقاف بوتك {filename} وحظرك مؤقتًا (لمدة {SECURITY_BAN_DURATION_MINUTES} دقيقة) بسبب تجاوزه حدود الموارد المسموح بها: {reason}. يرجى مراجعة كود بوتك.")
-            bot.send_message(ADMIN_ID, f"⚠️ تحذير أمني - إساءة استخدام موارد: تم إيقاف البوت {filename} وحظر مالكه {user_id} مؤقتًا بسبب {reason}")
-
-# --- 7. الأوامر الأساسية للمستخدمين ---
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
+    """رسالة الترحيب"""
     user_id = message.from_user.id
     username = message.from_user.username if message.from_user.username else f"id_{user_id}"
     register_user(user_id, username)
-
+    
     user_data = get_user_data(user_id)
     if user_data and user_data['is_banned']:
         if user_data['temp_ban_until'] and user_data['temp_ban_until'] > datetime.now():
-            remaining_time = user_data['temp_ban_until'] - datetime.now()
-            bot.send_message(message.chat.id, f"عذرًا، أنت محظور مؤقتًا حتى: {user_data['temp_ban_until'].strftime('%Y-%m-%d %H:%M:%S')} (المتبقي: {str(remaining_time).split('.')[0]}). السبب: {user_data['ban_reason']}")
+            remaining = user_data['temp_ban_until'] - datetime.now()
+            bot.send_message(
+                message.chat.id,
+                f"⛔ أنت محظور مؤقتاً\n\n"
+                f"المتبقي: {str(remaining).split('.')[0]}\n"
+                f"السبب: {user_data['ban_reason']}"
+            )
         else:
             if user_data['temp_ban_until']:
                 unban_user_db(user_id)
-                bot.send_message(message.chat.id, "تم فك الحظر عنك تلقائياً. أهلاً بك مرة أخرى!")
-                add_activity_log(ADMIN_ID, "auto_unban", f"User {user_id} unbanned automatically.")
+                bot.send_message(message.chat.id, "✅ تم فك الحظر عنك تلقائياً!")
             else:
-                bot.send_message(message.chat.id, f"عذرًا، أنت محظور من استخدام هذا البوت بسبب: {user_data['ban_reason']}. يرجى التواصل مع المطور: @llllllIlIlIlIlIlIlIl")
+                bot.send_message(
+                    message.chat.id,
+                    f"⛔ أنت محظور بشكل دائم\n"
+                    f"السبب: {user_data['ban_reason']}"
+                )
         return
-
-    markup = types.ReplyKeyboardMarkup(row_width=1, resize_keyboard=True)
+    
+    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
     
     if not is_subscribed(user_id, REQUIRED_CHANNEL_ID):
-        btn_check_sub = types.KeyboardButton('التحقق من الاشتراك ✅')
-        markup.add(btn_check_sub)
-        welcome_message = f"""
-أهلاً بك في بوت رفع واستضافة بوتات بايثون
-
-للبدء، يرجى الاشتراك في القناة التالية والضغط على "التحقق من الاشتراك":
-{REQUIRED_CHANNEL_ID}
-
-بعد الاشتراك، اضغط على الزر أدناه.
-"""
-        bot.send_message(message.chat.id, welcome_message, reply_markup=markup)
+        btn_check = types.KeyboardButton('✅ التحقق من الاشتراك')
+        markup.add(btn_check)
+        bot.send_message(
+            message.chat.id,
+            f"🤖 مرحباً بك في نظام استضافة البوتات الآمن!\n\n"
+            f"للبدء، يرجى الاشتراك في القناة:\n{REQUIRED_CHANNEL_ID}\n\n"
+            f"ثم اضغط على زر التحقق.",
+            reply_markup=markup
+        )
     else:
-        btn_upload = types.KeyboardButton('رفع ملف ⬆️')
-        btn_my_bots = types.KeyboardButton('بوتاتي 🤖')
-        btn_help = types.KeyboardButton('المساعدة ❓')
-        markup.add(btn_upload, btn_my_bots, btn_help)
-        welcome_message = """
-أهلاً بك في بوت رفع واستضافة بوتات بايثون
+        btn_upload = types.KeyboardButton('📤 رفع بوت')
+        btn_my_bots = types.KeyboardButton('🤖 بوتاتي')
+        btn_stats = types.KeyboardButton('📊 إحصائياتي')
+        btn_help = types.KeyboardButton('❓ المساعدة')
+        markup.add(btn_upload, btn_my_bots, btn_stats, btn_help)
+        
+        bot.send_message(
+            message.chat.id,
+            f"🤖 مرحباً بك في نظام استضافة البوتات الآمن!\n\n"
+            f"🔒 ميزات الأمان:\n"
+            f"• بيئة معزولة لكل مستخدم\n"
+            f"• تشفير التوكنات تلقائياً\n"
+            f"• حماية من الأكواد الخبيثة\n"
+            f"• مراقبة الموارد في الوقت الحقيقي\n\n"
+            f"استخدم الأزرار للتنقل.",
+            reply_markup=markup
+        )
+        add_activity_log(user_id, "start_command", "")
 
-🎯 مهام البوت:
-البوت مخصص لرفع واستضافة بوتات بايثون (.py) فقط.
-
-🚀 كيفية الاستخدام:
-* استخدم الأزرار للتنقل.
-* ارفع ملفك (يجب أن يكون بصيغة .py).
-
-للمساعدة:
-* اكتب /help لعرض الشروط.
-"""
-        bot.send_message(message.chat.id, welcome_message, reply_markup=markup)
-        add_activity_log(user_id, "start_command", "User started bot")
-
-@bot.message_handler(func=lambda message: message.text == 'التحقق من الاشتراك ✅')
-def check_subscription_button(message):
+@bot.message_handler(func=lambda m: m.text == '✅ التحقق من الاشتراك')
+def check_subscription(message):
+    """التحقق من الاشتراك"""
     user_id = message.from_user.id
-    user_data = get_user_data(user_id)
-    if user_data and user_data['is_banned']:
-        bot.send_message(message.chat.id, f"عذرًا، أنت محظور من استخدام هذا البوت بسبب: {user_data['ban_reason']}. يرجى التواصل مع المطور: @llllllIlIlIlIlIlIlIl")
-        return
-
+    
     if is_subscribed(user_id, REQUIRED_CHANNEL_ID):
-        markup = types.ReplyKeyboardMarkup(row_width=1, resize_keyboard=True)
-        btn_upload = types.KeyboardButton('رفع ملف ⬆️')
-        btn_my_bots = types.KeyboardButton('بوتاتي 🤖')
-        btn_help = types.KeyboardButton('المساعدة ❓')
-        markup.add(btn_upload, btn_my_bots, btn_help)
-        bot.send_message(message.chat.id, "✅ تم التحقق من اشتراكك بنجاح! يمكنك الآن استخدام البوت.", reply_markup=markup)
-        add_activity_log(user_id, "checked_subscription", "User confirmed subscription")
+        markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+        btn_upload = types.KeyboardButton('📤 رفع بوت')
+        btn_my_bots = types.KeyboardButton('🤖 بوتاتي')
+        btn_stats = types.KeyboardButton('📊 إحصائياتي')
+        btn_help = types.KeyboardButton('❓ المساعدة')
+        markup.add(btn_upload, btn_my_bots, btn_stats, btn_help)
+        
+        bot.send_message(
+            message.chat.id,
+            "✅ تم التحقق من اشتراكك بنجاح!\n"
+            "يمكنك الآن استخدام البوت.",
+            reply_markup=markup
+        )
     else:
-        markup = types.ReplyKeyboardMarkup(row_width=1, resize_keyboard=True)
-        btn_check_sub = types.KeyboardButton('التحقق من الاشتراك ✅')
-        markup.add(btn_check_sub)
-        bot.send_message(message.chat.id, f"""
-❌ لم يتم التحقق من اشتراكك. يرجى التأكد من الاشتراك في القناة التالية ثم الضغط على "التحقق من الاشتراك":
-{REQUIRED_CHANNEL_ID}
-""", reply_markup=markup)
+        bot.send_message(
+            message.chat.id,
+            f"❌ لم يتم التحقق من اشتراكك!\n"
+            f"يرجى الاشتراك في: {REQUIRED_CHANNEL_ID}"
+        )
 
-@bot.message_handler(func=lambda message: message.text == 'رفع ملف ⬆️')
-def ask_for_file(message):
+@bot.message_handler(func=lambda m: m.text == '📤 رفع بوت')
+def request_file_upload(message):
+    """طلب رفع ملف"""
     user_id = message.from_user.id
+    
     user_data = get_user_data(user_id)
     if user_data and user_data['is_banned']:
-        bot.send_message(message.chat.id, f"عذرًا، أنت محظور من استخدام هذا البوت بسبب: {user_data['ban_reason']}. يرجى التواصل مع المطور: @llllllIlIlIlIlIlIlIl")
+        bot.send_message(message.chat.id, "⛔ أنت محظور من استخدام البوت.")
         return
+    
     if not is_subscribed(user_id, REQUIRED_CHANNEL_ID):
         send_welcome(message)
         return
     
-    current_bots_count = get_user_bot_count(user_id)
-    if current_bots_count >= MAX_BOTS_PER_USER:
-        bot.send_message(message.chat.id, f"عذرًا، لقد وصلت إلى الحد الأقصى من البوتات المستضافة ({MAX_BOTS_PER_USER}). يرجى إيقاف/حذف بوت حالي لرفع بوت جديد.")
+    bot_count = get_user_bot_count(user_id)
+    if bot_count >= MAX_BOTS_PER_USER:
+        bot.send_message(
+            message.chat.id,
+            f"❌ وصلت للحد الأقصى ({MAX_BOTS_PER_USER} بوتات)!\n"
+            "احذف بوتاً قديماً لرفع بوت جديد."
+        )
         return
-
+    
     user_states[message.chat.id] = 'awaiting_file'
-    bot.send_message(message.chat.id, "الرجاء إرسال ملف البايثون (بصيغة .py) الذي ترغب في رفعه واستضافته.")
-    add_activity_log(user_id, "request_file_upload", "User requested to upload a file")
+    bot.send_message(
+        message.chat.id,
+        "📤 أرسل ملف البايثون (.py) الخاص ببوتك.\n\n"
+        "⚠️ متطلبات الملف:\n"
+        "• يجب أن يحتوي على توكن بوت تيليجرام صالح\n"
+        "• يجب أن يكون بصيغة .py\n"
+        "• الحد الأقصى للحجم: 5MB"
+    )
+    add_activity_log(user_id, "request_upload", "")
 
-@bot.message_handler(content_types=['document'], func=lambda message: user_states.get(message.chat.id) == 'awaiting_file')
-def handle_document(message):
+@bot.message_handler(content_types=['document'], func=lambda m: user_states.get(m.chat.id) == 'awaiting_file')
+def handle_file_upload(message):
+    """معالجة رفع الملف"""
     user_id = message.from_user.id
-    username = message.from_user.username if message.from_user.username else f"id_{user_id}"
+    username = message.from_user.username or f"id_{user_id}"
     register_user(user_id, username)
-
+    
+    user_states[message.chat.id] = None
+    
     user_data = get_user_data(user_id)
     if user_data and user_data['is_banned']:
-        bot.send_message(message.chat.id, f"عذرًا، أنت محظور من استخدام هذا البوت بسبب: {user_data['ban_reason']}. يرجى التواصل مع المطور: @llllllIlIlIlIlIlIlIl")
-        user_states[message.chat.id] = None
-        return
-    if not is_subscribed(user_id, REQUIRED_CHANNEL_ID):
-        send_welcome(message)
-        user_states[message.chat.id] = None
-        return
-
-    if not message.document.file_name.endswith('.py'):
-        bot.send_message(message.chat.id, "عذرًا، يجب أن يكون الملف بصيغة .py فقط. الرجاء إعادة المحاولة.")
-        user_states[message.chat.id] = None
+        bot.send_message(message.chat.id, "⛔ أنت محظور.")
         return
     
-    file_name = message.document.file_name
-    file_path = os.path.join(UPLOADED_BOTS_DIR, file_name)
-
-    if os.path.exists(file_path):
-        bot.send_message(message.chat.id, "ملف بهذا الاسم موجود بالفعل. يرجى تغيير اسم ملفك وإعادة المحاولة.")
-        user_states[message.chat.id] = None
+    if not is_subscribed(user_id, REQUIRED_CHANNEL_ID):
+        send_welcome(message)
         return
-
+    
+    filename = message.document.file_name
+    
+    if not filename.endswith('.py'):
+        bot.send_message(message.chat.id, "❌ يجب أن يكون الملف بصيغة .py فقط!")
+        return
+    
+    # التحقق من تكرار اسم الملف للمستخدم
+    existing_bots = get_all_hosted_bots_db(user_id)
+    if existing_bots:
+        for existing_bot in existing_bots:
+            if existing_bot[0] == filename:
+                bot.send_message(
+                    message.chat.id,
+                    "❌ لديك بوت بنفس اسم الملف!\n"
+                    "احذف البوت القديم أولاً أو غيّر اسم الملف."
+                )
+                return
+    
     try:
         file_info = bot.get_file(message.document.file_id)
-        downloaded_file = bot.download_file(file_info.file_path)
-
-        if len(downloaded_file) > MAX_FILE_SIZE_MB * 1024 * 1024:
-            ban_user_db(user_id, f"File size ({len(downloaded_file)/(1024*1024):.2f}MB) exceeded limit ({MAX_FILE_SIZE_MB}MB)", is_temp=True, duration_minutes=SECURITY_BAN_DURATION_MINUTES)
-            add_security_log(user_id, "file_size_exceeded", f"Filename: {file_name}, Size: {len(downloaded_file)} bytes")
-            bot.send_message(message.chat.id, f"حجم الملف كبير جداً. تم حظرك تلقائياً (لمدة {SECURITY_BAN_DURATION_MINUTES} دقيقة) بسبب انتهاك شروط الاستخدام. يرجى التواصل مع المطور: @llllllIlIlIlIlIlIlIl")
-            bot.send_message(ADMIN_ID, f"⚠️ تحذير أمني - حجم ملف كبير: تم حظر المستخدم {user_id} بسبب محاولة رفع ملف بحجم كبير جداً ({len(downloaded_file)} بايت)")
-            user_states[message.chat.id] = None
-            return
-
-        with open(file_path, 'wb') as new_file:
-            new_file.write(downloaded_file)
-
-        is_malicious, detected_pattern = analyze_for_malicious_code(file_path)
-        if is_malicious:
-            ban_user_db(user_id, f"Detected malicious pattern: {detected_pattern}", is_temp=True, duration_minutes=SECURITY_BAN_DURATION_MINUTES)
-            os.remove(file_path)
-            add_security_log(user_id, "malicious_code_detected", f"Filename: {file_name}, Pattern: {detected_pattern}")
-            
-            security_failures[user_id]['count'] += 1
-            security_failures[user_id]['last_failure'] = datetime.now()
-            
-            bot.send_message(message.chat.id, f"تم اكتشاف محتوى غير آمن في ملفك ({detected_pattern}). تم حظرك من استخدام البوت تلقائيًا (لمدة {SECURITY_BAN_DURATION_MINUTES} دقيقة) بسبب انتهاك شروط الاستخدام. يرجى التواصل مع المطور لفك الحظر: @llllllIlIlIlIlIlIlIl")
-            bot.send_message(ADMIN_ID, f"⚠️ تحذير أمني - كود خبيث: تم حظر المستخدم {user_id} مؤقتاً بسبب محاولة رفع ملف يحتوي على محتوى مشبوه ({detected_pattern}). تم حذف الملف: {file_name}")
-            
-            if security_failures[user_id]['count'] >= SECURITY_FAILURE_THRESHOLD:
-                ban_user_db(user_id, f"Repeated security violations (Malicious code: {detected_pattern})", is_temp=False)
-                bot.send_message(user_id, "لقد تجاوزت عدد محاولات رفع الأكواد الضارة المسموح بها. تم حظرك بشكل دائم. يرجى التواصل مع المطور: @llllllIlIlIlIlIlIlIl")
-                bot.send_message(ADMIN_ID, f"🚨 تحذير أمني - حظر دائم: المستخدم {user_id} تم حظره دائمًا بسبب تكرار انتهاكات الأمان.")
-            
-            user_states[message.chat.id] = None
-            return
-
-        bot.send_message(message.chat.id, f"تم استقبال ملفك بنجاح: {file_name}. جاري الاستضافة...")
-        add_activity_log(user_id, "file_uploaded", f"Filename: {file_name}")
-
-        if file_name in running_processes:
-            terminate_process(file_name)
-            bot.send_message(message.chat.id, f"تم إيقاف الإصدار السابق من {file_name} لتحديثه.")
-            add_activity_log(user_id, "bot_stopped_for_update", f"Filename: {file_name}")
+        file_content = bot.download_file(file_info.file_path)
         
-        bot_stdout_path = os.path.join(UPLOADED_BOTS_DIR, f"{file_name}.stdout")
-        bot_stderr_path = os.path.join(UPLOADED_BOTS_DIR, f"{file_name}.stderr")
-
-        with open(bot_stdout_path, 'w') as stdout_file, open(bot_stderr_path, 'w') as stderr_file:
-            try:
-                process = subprocess.Popen(
-                    ['python3', file_name],
-                    cwd=UPLOADED_BOTS_DIR,
-                    stdout=stdout_file,
-                    stderr=stderr_file,
-                    close_fds=True
-                )
-                running_processes[file_name] = process
-                add_hosted_bot_db(user_id, file_name, process.pid, 'running')
-                
-                time.sleep(3)
-
-                if process.poll() is None:
-                    bot.send_message(message.chat.id, f"تم استضافة البوت {file_name} بنجاح وسيظل يعمل بشكل دائم! ✅")
-                    add_activity_log(user_id, "bot_started", f"Filename: {file_name}, PID: {process.pid}")
-                else:
-                    with open(bot_stderr_path, 'r') as err_f:
-                        stderr_output = err_f.read().strip()
-                    bot.send_message(message.chat.id, f"حدث خطأ أثناء تشغيل البوت {file_name}:\n{stderr_output[:1000]}...")
-                    bot.send_message(ADMIN_ID, f"⚠️ خطأ تشغيل بوت: فشل تشغيل البوت {file_name} للمستخدم {user_id}")
-                    update_hosted_bot_status_db(file_name, 'error', error_log=stderr_output[:1000])
-                    add_activity_log(user_id, "bot_start_failed", f"Filename: {file_name}, Error: {stderr_output[:200]}")
-                    if file_name in running_processes:
-                        del running_processes[file_name]
-
-            except Exception as e:
-                bot.send_message(message.chat.id, f"حدث خطأ غير متوقع أثناء الاستضافة: {e}")
-                bot.send_message(ADMIN_ID, f"⚠️ خطأ عام في الاستضافة: حدث خطأ غير متوقع للمستخدم {user_id} أثناء استضافة {file_name}")
-                update_hosted_bot_status_db(file_name, 'error', error_log=str(e))
-
+        # التحقق من الحجم
+        if len(file_content) > MAX_FILE_SIZE_MB * 1024 * 1024:
+            ban_user_db(user_id, "File size exceeded", is_temp=True, duration_minutes=SECURITY_BAN_DURATION_MINUTES)
+            add_security_log(user_id, "file_size_exceeded", f"Size: {len(file_content)} bytes")
+            bot.send_message(
+                message.chat.id,
+                f"❌ حجم الملف كبير جداً!\n"
+                f"الحد المسموح: {MAX_FILE_SIZE_MB}MB"
+            )
+            return
+        
+        bot.send_message(message.chat.id, "⏳ جاري فحص الملف وتحليله...")
+        
+        # معالجة الملف مع جميع طبقات الأمان
+        process_uploaded_file(message, file_content, filename, user_id)
+        
     except Exception as e:
-        bot.send_message(message.chat.id, f"حدث خطأ غير متوقع أثناء معالجة ملفك: {e}")
-        bot.send_message(ADMIN_ID, f"⚠️ خطأ في معالجة الملف: حدث خطأ غير متوقع للمستخدم {user_id}: {e}")
-        add_activity_log(user_id, "file_processing_error", f"Error: {e}")
+        bot.send_message(message.chat.id, f"❌ خطأ في معالجة الملف: {e}")
+        add_security_log(user_id, "file_processing_error", str(e))
 
-    user_states[message.chat.id] = None
-
-@bot.message_handler(func=lambda message: message.text == 'بوتاتي 🤖')
-def list_user_bots(message):
+@bot.message_handler(func=lambda m: m.text == '🤖 بوتاتي')
+def list_my_bots(message):
+    """عرض بوتات المستخدم"""
     user_id = message.from_user.id
+    
     user_data = get_user_data(user_id)
     if user_data and user_data['is_banned']:
-        bot.send_message(message.chat.id, f"عذرًا، أنت محظور من استخدام هذا البوت بسبب: {user_data['ban_reason']}. يرجى التواصل مع المطور: @llllllIlIlIlIlIlIlIl")
+        bot.send_message(message.chat.id, "⛔ أنت محظور.")
         return
+    
     if not is_subscribed(user_id, REQUIRED_CHANNEL_ID):
         send_welcome(message)
         return
-
-    bots_data = get_all_hosted_bots_db(user_id)
-    if bots_data:
-        bots_list_msg = "بوتاتك المستضافة:\n"
-        for i, (filename, status, _, _, last_started, start_count) in enumerate(bots_data):
-            start_time_str = datetime.strptime(last_started, '%Y-%m-%d %H:%M:%S').strftime('%Y-%m-%d %H:%M') if last_started else 'N/A'
-            bots_list_msg += f"{i+1}. {filename}\n   الحالة: {status} | بدأ: {start_time_str} | مرات التشغيل: {start_count}\n"
-        
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        for filename_in_data, status, _, _, _, _ in bots_data:
-            btn_stop = types.InlineKeyboardButton(f"إيقاف {filename_in_data[:10]}", callback_data=f"user_stop_{filename_in_data}")
-            btn_delete = types.InlineKeyboardButton(f"حذف {filename_in_data[:10]}", callback_data=f"user_delete_{filename_in_data}")
-            markup.add(btn_stop, btn_delete)
-        
-        bot.send_message(message.chat.id, bots_list_msg, reply_markup=markup)
-    else:
-        bot.send_message(message.chat.id, "ليس لديك أي بوتات مستضافة حاليًا. قم برفع ملف جديد!")
-    add_activity_log(user_id, "viewed_my_bots", "")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('user_'))
-def user_bot_actions_callback(call):
-    user_id = call.from_user.id
-    action = call.data.split('_')[1]
-    filename = '_'.join(call.data.split('_')[2:])
-
-    user_data = get_user_data(user_id)
-    if user_data and user_data['is_banned']:
-        bot.answer_callback_query(call.id, "عذرًا، أنت محظور من استخدام هذا البوت.")
+    
+    bots = get_all_hosted_bots_db(user_id)
+    
+    if not bots:
+        bot.send_message(message.chat.id, "📭 ليس لديك أي بوتات مستضافة.")
         return
     
-    bot_info = db_execute("SELECT user_id, status FROM hosted_bots WHERE filename = ?", (filename,), fetch_one=True)
-    if not bot_info or bot_info[0] != user_id:
-        bot.answer_callback_query(call.id, "ليس لديك صلاحية للتحكم بهذا البوت.")
-        return
+    msg = "🤖 بوتاتك المستضافة:\n\n"
+    
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    
+    for bot_data in bots:
+        filename, status, _, pid, last_started, start_count, bot_username, bot_name = bot_data
+        
+        status_emoji = "🟢" if status == 'running' else "🔴" if status == 'error' else "⚪"
+        
+        msg += f"{status_emoji} {filename}\n"
+        msg += f"   البوت: @{bot_username or 'غير معروف'}\n"
+        msg += f"   الاسم: {bot_name or 'غير معروف'}\n"
+        msg += f"   الحالة: {status}\n"
+        msg += f"   مرات التشغيل: {start_count}\n\n"
+        
+        btn_stop = types.InlineKeyboardButton(f"⏹ إيقاف", callback_data=f"user_stop_{filename}")
+        btn_delete = types.InlineKeyboardButton(f"🗑 حذف", callback_data=f"user_delete_{filename}")
+        btn_restart = types.InlineKeyboardButton(f"🔄 إعادة", callback_data=f"user_restart_{filename}")
+        markup.add(btn_stop, btn_restart, btn_delete)
+    
+    bot.send_message(message.chat.id, msg, reply_markup=markup)
+    add_activity_log(user_id, "view_bots", "")
 
+@bot.callback_query_handler(func=lambda c: c.data.startswith('user_'))
+def handle_user_bot_actions(call):
+    """معالجة أوامر التحكم بالبوتات"""
+    user_id = call.from_user.id
+    parts = call.data.split('_', 2)
+    action = parts[1]
+    filename = parts[2]
+    
+    user_data = get_user_data(user_id)
+    if user_data and user_data['is_banned']:
+        bot.answer_callback_query(call.id, "⛔ أنت محظور.")
+        return
+    
+    # التحقق من ملكية البوت
+    bot_info = db_execute(
+        "SELECT user_id, status FROM hosted_bots WHERE filename = ?",
+        (filename,), fetch_one=True
+    )
+    
+    if not bot_info or bot_info[0] != user_id:
+        bot.answer_callback_query(call.id, "❌ ليس لديك صلاحية.")
+        return
+    
+    sandbox = sandbox_manager.get_user_sandbox(user_id)
+    
     if action == 'stop':
         if terminate_process(filename):
-            bot.send_message(call.message.chat.id, f"تم إيقاف البوت {filename} بنجاح.")
-            add_activity_log(user_id, "user_stopped_bot", f"Filename: {filename}")
+            bot.send_message(call.message.chat.id, f"✅ تم إيقاف البوت: {filename}")
+            add_activity_log(user_id, "stop_bot", filename)
         else:
-            bot.send_message(call.message.chat.id, f"البوت {filename} ليس قيد التشغيل أو حدث خطأ أثناء الإيقاف.")
-        bot.answer_callback_query(call.id)
+            bot.send_message(call.message.chat.id, f"⚠️ البوت غير شغال أو حدث خطأ.")
+    
+    elif action == 'restart':
+        terminate_process(filename)
+        
+        file_path = os.path.join(sandbox['bots'], filename)
+        if os.path.exists(file_path):
+            try:
+                bot_stdout = os.path.join(sandbox['logs'], f"{filename}.stdout")
+                bot_stderr = os.path.join(sandbox['logs'], f"{filename}.stderr")
+                
+                with open(bot_stdout, 'w') as stdout_f, open(bot_stderr, 'w') as stderr_f:
+                    process = subprocess.Popen(
+                        ['python3', file_path],
+                        cwd=sandbox['bots'],
+                        stdout=stdout_f,
+                        stderr=stderr_f,
+                        close_fds=True,
+                        start_new_session=True
+                    )
+                    
+                    running_processes[filename] = process
+                    resource_monitor.add_process(filename, process.pid, user_id)
+                    update_hosted_bot_status_db(filename, 'running', process.pid)
+                    
+                    bot.send_message(call.message.chat.id, f"✅ تم إعادة تشغيل البوت: {filename}")
+                    add_activity_log(user_id, "restart_bot", filename)
+            except Exception as e:
+                bot.send_message(call.message.chat.id, f"❌ خطأ: {e}")
+        else:
+            bot.send_message(call.message.chat.id, "❌ ملف البوت غير موجود!")
+    
     elif action == 'delete':
-        if terminate_process(filename):
-            bot.send_message(call.message.chat.id, f"تم إيقاف البوت {filename} قبل حذفه.")
+        terminate_process(filename)
+        
+        file_path = os.path.join(sandbox['bots'], filename)
         try:
-            os.remove(os.path.join(UPLOADED_BOTS_DIR, filename))
-            if os.path.exists(os.path.join(UPLOADED_BOTS_DIR, f"{filename}.stdout")):
-                os.remove(os.path.join(UPLOADED_BOTS_DIR, f"{filename}.stdout"))
-            if os.path.exists(os.path.join(UPLOADED_BOTS_DIR, f"{filename}.stderr")):
-                os.remove(os.path.join(UPLOADED_BOTS_DIR, f"{filename}.stderr"))
-
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            
+            # حذف ملفات السجلات
+            for ext in ['.stdout', '.stderr']:
+                log_file = os.path.join(sandbox['logs'], f"{filename}{ext}")
+                if os.path.exists(log_file):
+                    os.remove(log_file)
+            
             delete_hosted_bot_db(filename)
-            bot.send_message(call.message.chat.id, f"تم حذف البوت {filename} بنجاح من الخادم وقاعدة البيانات.")
-            add_activity_log(user_id, "user_deleted_bot", f"Filename: {filename}")
+            db_execute("DELETE FROM encrypted_tokens WHERE user_id = ? AND filename = ?", (user_id, filename), commit=True)
+            
+            bot.send_message(call.message.chat.id, f"✅ تم حذف البوت: {filename}")
+            add_activity_log(user_id, "delete_bot", filename)
         except Exception as e:
-            bot.send_message(call.message.chat.id, f"حدث خطأ أثناء حذف البوت {filename}: {e}")
-            bot.send_message(ADMIN_ID, f"⚠️ خطأ مطور - حذف بوت المستخدم: المستخدم {user_id} حاول حذف {filename} وحدث خطأ: {e}")
-        bot.answer_callback_query(call.id)
+            bot.send_message(call.message.chat.id, f"❌ خطأ في الحذف: {e}")
+    
+    bot.answer_callback_query(call.id)
 
-@bot.message_handler(commands=['help'])
-def send_help(message):
+@bot.message_handler(func=lambda m: m.text == '📊 إحصائياتي')
+def show_my_stats(message):
+    """عرض إحصائيات المستخدم"""
     user_id = message.from_user.id
+    
     user_data = get_user_data(user_id)
-    if user_data and user_data['is_banned']:
-        bot.send_message(message.chat.id, f"عذرًا، أنت محظور من استخدام هذا البوت بسبب: {user_data['ban_reason']}. يرجى التواصل مع المطور: @llllllIlIlIlIlIlIlIl")
+    if not user_data:
+        bot.send_message(message.chat.id, "❌ لم يتم العثور على بياناتك.")
         return
-    if not is_subscribed(user_id, REQUIRED_CHANNEL_ID):
-        send_welcome(message)
-        return
+    
+    sandbox = sandbox_manager.get_user_sandbox(user_id)
+    disk_usage = sandbox_manager.get_user_disk_usage(user_id)
+    bots = get_all_hosted_bots_db(user_id)
+    running_count = len([b for b in bots if b[1] == 'running']) if bots else 0
+    
+    msg = f"""📊 إحصائياتك:
 
-    help_message = f"""
-للمساعدة والشروط:
-* رفع ملف: اضغط على زر "رفع ملف ⬆️" ثم أرسل ملف البايثون الخاص بك (يجب أن يكون بصيغة .py)
-* عدد البوتات: يمكن لكل مستخدم استضافة {MAX_BOTS_PER_USER} بوت كحد أقصى
-* الاستضافة: سيتم استضافة بوتك وتشغيله بشكل دائم
-* الحماية: يتم فحص الملفات المرفوعة للكشف عن أي أكواد ضارة
-    * أي محاولة لرفع كود خبيث ستؤدي إلى حظرك المؤقت (لمدة {SECURITY_BAN_DURATION_MINUTES} دقيقة)
-    * تكرار المحاولات سيؤدي إلى حظرك الدائم
-* الدعم الفني: في حال واجهت أي مشاكل يرجى التواصل مع المطور: @llllllIlIlIlIlIlIlIl
+👤 المستخدم: {user_data['username']}
+🆔 المعرف: {user_id}
+
+🤖 البوتات:
+• المجموع: {len(bots) if bots else 0}/{MAX_BOTS_PER_USER}
+• قيد التشغيل: {running_count}
+
+💾 التخزين:
+• المستخدم: {disk_usage:.2f}MB
+• الحد: {RESOURCE_DISK_LIMIT_MB}MB
+
+🔒 الأمان:
+• النقاط: {user_data.get('security_score', 100)}/100
+• الحالة: {'محظور' if user_data['is_banned'] else 'نشط'}
 """
-    bot.send_message(message.chat.id, help_message)
-    add_activity_log(user_id, "requested_help", "")
+    
+    bot.send_message(message.chat.id, msg)
 
+@bot.message_handler(func=lambda m: m.text == '❓ المساعدة')
+def show_help(message):
+    """عرض المساعدة"""
+    help_text = f"""❓ دليل الاستخدام:
 
-# --- 8. أوامر المطور (الأدمن) ---
-@bot.message_handler(commands=['admin_panel'])
+📤 رفع بوت:
+• أرسل ملف .py يحتوي على توكن بوت تيليجرام
+• النظام سيتحقق من صحة التوكن تلقائياً
+• الكود سيُفحص للتأكد من أمانه
+
+🔒 قواعد الأمان:
+• لا يُسمح بأوامر النظام الخطيرة
+• لا يُسمح بالوصول لملفات المستخدمين الآخرين
+• التوكنات مشفرة ومحمية
+• مراقبة الموارد في الوقت الحقيقي
+
+⚙️ الحدود:
+• عدد البوتات: {MAX_BOTS_PER_USER}
+• حجم الملف: {MAX_FILE_SIZE_MB}MB
+• RAM: {RESOURCE_RAM_LIMIT_MB}MB
+• CPU: {RESOURCE_CPU_LIMIT_PERCENT}%
+
+⚠️ انتهاك القواعد يؤدي للحظر!
+"""
+    bot.send_message(message.chat.id, help_text)
+
+# ═══════════════════════════════════════════════════════════════════
+# 🛠️ أوامر المطور
+# ═══════════════════════════════════════════════════════════════════
+
+@bot.message_handler(commands=['admin', 'admin_panel'])
 def admin_panel(message):
+    """لوحة تحكم المطور"""
     if not is_admin(message.from_user.id):
-        bot.send_message(message.chat.id, "ليس لديك صلاحيات للوصول إلى لوحة تحكم المطور.")
+        bot.send_message(message.chat.id, "⛔ ليس لديك صلاحيات.")
         return
-
+    
     markup = types.InlineKeyboardMarkup(row_width=2)
-    btn_list_bots = types.InlineKeyboardButton('البوتات المستضافة', callback_data='admin_list_bots')
-    btn_stop_bot = types.InlineKeyboardButton('إيقاف بوت', callback_data='admin_stop_bot')
-    btn_delete_bot = types.InlineKeyboardButton('حذف بوت', callback_data='admin_delete_bot')
-    btn_ban_user = types.InlineKeyboardButton('حظر مستخدم', callback_data='admin_ban_user')
-    btn_unban_user = types.InlineKeyboardButton('فك حظر مستخدم', callback_data='admin_unban_user')
-    btn_list_banned = types.InlineKeyboardButton('قائمة المحظورين', callback_data='admin_list_banned')
-    btn_view_file = types.InlineKeyboardButton('عرض ملف', callback_data='admin_view_file')
-    btn_exec_command = types.InlineKeyboardButton('تنفيذ أمر', callback_data='admin_exec_command')
-    btn_reboot_all = types.InlineKeyboardButton('إعادة تشغيل الكل', callback_data='admin_reboot_all_bots')
-    btn_logs_activity = types.InlineKeyboardButton('سجل النشاط', callback_data='admin_logs_activity')
-    btn_logs_security = types.InlineKeyboardButton('سجل الأمان', callback_data='admin_logs_security')
-    btn_stats = types.InlineKeyboardButton('الإحصائيات', callback_data='admin_stats')
-    btn_cleanup = types.InlineKeyboardButton('تنظيف البوتات', callback_data='admin_cleanup_stopped_bots')
     
-    markup.add(btn_list_bots, btn_stop_bot, btn_delete_bot, btn_ban_user, btn_unban_user, btn_list_banned, btn_view_file, btn_exec_command, btn_reboot_all, btn_logs_activity, btn_logs_security, btn_stats, btn_cleanup)
+    buttons = [
+        ('📊 الإحصائيات', 'admin_stats'),
+        ('🤖 البوتات', 'admin_bots'),
+        ('👥 المستخدمين', 'admin_users'),
+        ('🚫 المحظورين', 'admin_banned'),
+        ('📜 سجل الأمان', 'admin_security_logs'),
+        ('📋 سجل النشاط', 'admin_activity_logs'),
+        ('💻 حالة النظام', 'admin_system'),
+        ('🔄 إعادة تشغيل الكل', 'admin_reboot_all'),
+    ]
     
-    bot.send_message(message.chat.id, "لوحة تحكم المطور:\nاختر الإجراء المطلوب:", reply_markup=markup)
-    add_activity_log(message.from_user.id, "admin_panel_accessed", "")
+    for text, callback in buttons:
+        markup.add(types.InlineKeyboardButton(text, callback_data=callback))
+    
+    bot.send_message(
+        message.chat.id,
+        "🛠️ لوحة تحكم المطور\n\nاختر الإجراء المطلوب:",
+        reply_markup=markup
+    )
+    add_activity_log(message.from_user.id, "admin_panel", "")
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('admin_'))
-def admin_callback_query(call):
+@bot.callback_query_handler(func=lambda c: c.data.startswith('admin_'))
+def handle_admin_actions(call):
+    """معالجة أوامر المطور"""
     if not is_admin(call.from_user.id):
-        bot.answer_callback_query(call.id, "ليس لديك صلاحيات.")
+        bot.answer_callback_query(call.id, "⛔ ليس لديك صلاحيات.")
         return
-
+    
     action = call.data.replace('admin_', '')
-    add_activity_log(call.from_user.id, f"admin_action_{action}", "")
-
-    if action == 'list_bots':
-        bots_data = get_all_hosted_bots_db()
-        if bots_data:
-            bots_status = "البوتات المستضافة حاليًا:\n"
-            for filename, status, user_id, pid, last_started, start_count in bots_data:
-                username = get_user_data(user_id)['username'] if get_user_data(user_id) else "N/A"
-                start_time_str = datetime.strptime(last_started, '%Y-%m-%d %H:%M:%S').strftime('%Y-%m-%d %H:%M') if last_started else 'N/A'
-                bots_status += f"📁 {filename}\n   الحالة: {status} | PID: {pid if pid else 'N/A'} | المستخدم: {username} (ID: {user_id})\n   بدأ: {start_time_str} | مرات التشغيل: {start_count}\n\n"
-            if len(bots_status) > 4000:
-                parts = [bots_status[i:i+4000] for i in range(0, len(bots_status), 4000)]
-                for part in parts:
-                    bot.send_message(call.message.chat.id, part)
-            else:
-                bot.send_message(call.message.chat.id, bots_status)
-        else:
-            bot.send_message(call.message.chat.id, "لا توجد بوتات مستضافة حاليًا.")
-        bot.answer_callback_query(call.id)
-
-    elif action == 'stop_bot':
-        bot.send_message(call.message.chat.id, "الرجاء إرسال اسم الملف الخاص بالبوت الذي تريد إيقافه (مثال: my_bot.py)")
-        user_states[call.from_user.id] = 'awaiting_admin_stop_bot_filename'
-        bot.answer_callback_query(call.id)
-
-    elif action == 'delete_bot':
-        bot.send_message(call.message.chat.id, "الرجاء إرسال اسم الملف الخاص بالبوت الذي تريد حذفه (مثال: my_bot.py)")
-        user_states[call.from_user.id] = 'awaiting_admin_delete_bot_filename'
-        bot.answer_callback_query(call.id)
     
-    elif action == 'ban_user':
-        bot.send_message(call.message.chat.id, "الرجاء إرسال ID المستخدم الذي تريد حظره")
-        user_states[call.from_user.id] = 'awaiting_admin_ban_user_id'
-        bot.answer_callback_query(call.id)
-
-    elif action == 'unban_user':
-        bot.send_message(call.message.chat.id, "الرجاء إرسال ID المستخدم الذي تريد فك حظره")
-        user_states[call.from_user.id] = 'awaiting_admin_unban_user_id'
-        bot.answer_callback_query(call.id)
-
-    elif action == 'list_banned':
-        banned_users = get_banned_users_db()
-        if banned_users:
-            banned_list = "المستخدمون المحظورون:\n"
-            for user_id_banned, username, reason, temp_ban_until in banned_users:
-                ban_type = "مؤقت" if temp_ban_until else "دائم"
-                until_msg = f" (حتى: {temp_ban_until})" if temp_ban_until else ""
-                banned_list += f"👤 {user_id_banned} (Username: {username})\n   النوع: {ban_type} | السبب: {reason}{until_msg}\n\n"
-            if len(banned_list) > 4000:
-                parts = [banned_list[i:i+4000] for i in range(0, len(banned_list), 4000)]
-                for part in parts:
-                    bot.send_message(call.message.chat.id, part)
-            else:
-                bot.send_message(call.message.chat.id, banned_list)
-        else:
-            bot.send_message(call.message.chat.id, "لا يوجد مستخدمون محظورون حاليًا.")
-        bot.answer_callback_query(call.id)
-
-    elif action == 'view_file':
-        bot.send_message(call.message.chat.id, "الرجاء إرسال اسم الملف الذي تريد عرض محتواه (مثال: my_bot.py)")
-        user_states[call.from_user.id] = 'awaiting_admin_view_file_filename'
-        bot.answer_callback_query(call.id)
-
-    elif action == 'exec_command':
-        bot.send_message(call.message.chat.id, "الرجاء إرسال الأمر الذي تريد تنفيذه في الـ shell (مثال: ls -l, df -h)")
-        user_states[call.from_user.id] = 'awaiting_admin_shell_command'
-        bot.answer_callback_query(call.id)
-
-    elif action == 'reboot_all_bots':
-        bot.send_message(call.message.chat.id, "جاري إعادة تشغيل جميع البوتات المستضافة...")
-        bots_data = get_all_hosted_bots_db()
-        rebooted_count = 0
-        for filename, status, user_id, pid, _, _ in bots_data:
-            if terminate_process(filename):
-                try:
-                    file_path = os.path.join(UPLOADED_BOTS_DIR, filename)
-                    bot_stdout_path = os.path.join(UPLOADED_BOTS_DIR, f"{filename}.stdout")
-                    bot_stderr_path = os.path.join(UPLOADED_BOTS_DIR, f"{filename}.stderr")
-                    with open(bot_stdout_path, 'w') as stdout_file, open(bot_stderr_path, 'w') as stderr_file:
-                        process = subprocess.Popen(
-                            ['python3', file_path],
-                            stdout=stdout_file,
-                            stderr=stderr_file,
-                            close_fds=True
-                        )
-                        running_processes[filename] = process
-                        update_hosted_bot_status_db(filename, 'running', process.pid)
-                        rebooted_count += 1
-                except Exception as e:
-                    bot.send_message(ADMIN_ID, f"⚠️ خطأ في إعادة تشغيل بوت: فشل إعادة تشغيل البوت {filename} للمستخدم {user_id}")
-                    update_hosted_bot_status_db(filename, 'error', error_log=str(e))
-            else:
-                 bot.send_message(ADMIN_ID, f"⚠️ خطأ في إعادة تشغيل بوت: فشل إيقاف البوت {filename} قبل إعادة تشغيله")
-
-        bot.send_message(call.message.chat.id, f"تمت محاولة إعادة تشغيل {rebooted_count} بوت بنجاح.")
-        bot.answer_callback_query(call.id)
-    
-    elif action == 'logs_activity':
-        logs = db_execute("SELECT timestamp, user_id, action, details FROM activity_logs ORDER BY timestamp DESC LIMIT 50", fetch_all=True)
-        if logs:
-            log_message = "آخر 50 سجل نشاط:\n"
-            for timestamp, user_id, action, details in logs:
-                username = get_user_data(user_id)['username'] if get_user_data(user_id) else "N/A"
-                log_message += f"🕒 {timestamp} | 👤 {user_id} ({username}) | 📝 {action}: {details}\n"
-            if len(log_message) > 4000:
-                parts = [log_message[i:i+4000] for i in range(0, len(log_message), 4000)]
-                for part in parts:
-                    bot.send_message(call.message.chat.id, part)
-            else:
-                bot.send_message(call.message.chat.id, log_message)
-        else:
-            bot.send_message(call.message.chat.id, "لا توجد سجلات نشاط.")
-        bot.answer_callback_query(call.id)
-
-    elif action == 'logs_security':
-        logs = db_execute("SELECT timestamp, user_id, action, details FROM security_logs ORDER BY timestamp DESC LIMIT 50", fetch_all=True)
-        if logs:
-            log_message = "آخر 50 سجل أمان:\n"
-            for timestamp, user_id, action, details in logs:
-                username = get_user_data(user_id)['username'] if get_user_data(user_id) else "N/A"
-                log_message += f"🕒 {timestamp} | 👤 {user_id} ({username}) | 🚨 {action}: {details}\n"
-            if len(log_message) > 4000:
-                parts = [log_message[i:i+4000] for i in range(0, len(log_message), 4000)]
-                for part in parts:
-                    bot.send_message(call.message.chat.id, part)
-            else:
-                bot.send_message(call.message.chat.id, log_message)
-        else:
-            bot.send_message(call.message.chat.id, "لا توجد سجلات أمان.")
-        bot.answer_callback_query(call.id)
-    
-    elif action == 'stats':
+    if action == 'stats':
         total_users = db_execute("SELECT COUNT(*) FROM users", fetch_one=True)[0]
         banned_users = db_execute("SELECT COUNT(*) FROM users WHERE is_banned = 1", fetch_one=True)[0]
         total_bots = db_execute("SELECT COUNT(*) FROM hosted_bots", fetch_one=True)[0]
         running_bots = db_execute("SELECT COUNT(*) FROM hosted_bots WHERE status = 'running'", fetch_one=True)[0]
-
-        total_size_bytes = 0
-        for dirpath, dirnames, filenames in os.walk(UPLOADED_BOTS_DIR):
-            for f in filenames:
-                fp = os.path.join(dirpath, f)
-                if not os.path.islink(fp):
-                    total_size_bytes += os.path.getsize(fp)
         
-        stats_message = f"""
-📊 إحصائيات النظام:
-👥 إجمالي المستخدمين: {total_users}
-🚫 المستخدمون المحظورون: {banned_users}
-🤖 إجمالي البوتات المستضافة: {total_bots}
-⚡ البوتات العاملة حاليًا: {running_bots}
-💾 المساحة المستخدمة: {total_size_bytes / (1024 * 1024):.2f} MB
+        system_stats = resource_monitor.get_system_stats()
+        
+        msg = f"""📊 إحصائيات النظام:
+
+👥 المستخدمين:
+• المجموع: {total_users}
+• المحظورين: {banned_users}
+
+🤖 البوتات:
+• المجموع: {total_bots}
+• قيد التشغيل: {running_bots}
+
+💻 موارد النظام:
+• CPU: {system_stats['cpu_percent']:.1f}%
+• RAM: {system_stats['ram_used_mb']:.0f}/{system_stats['ram_total_mb']:.0f}MB ({system_stats['ram_percent']:.1f}%)
+• Disk: {system_stats['disk_percent']:.1f}%
 """
-        bot.send_message(call.message.chat.id, stats_message)
-        bot.answer_callback_query(call.id)
+        bot.send_message(call.message.chat.id, msg)
     
-    elif action == 'cleanup_stopped_bots':
-        stopped_bots = db_execute("SELECT filename FROM hosted_bots WHERE status = 'stopped' OR status = 'error'", fetch_all=True)
-        cleaned_count = 0
-        if stopped_bots:
-            for bot_file_tuple in stopped_bots:
-                filename = bot_file_tuple[0]
-                file_path = os.path.join(UPLOADED_BOTS_DIR, filename)
-                bot_stdout_path = os.path.join(UPLOADED_BOTS_DIR, f"{filename}.stdout")
-                bot_stderr_path = os.path.join(UPLOADED_BOTS_DIR, f"{filename}.stderr")
-                try:
-                    if os.path.exists(file_path):
-                        os.remove(file_path)
-                    if os.path.exists(bot_stdout_path):
-                        os.remove(bot_stdout_path)
-                    if os.path.exists(bot_stderr_path):
-                        os.remove(bot_stderr_path)
-
-                    delete_hosted_bot_db(filename)
-                    cleaned_count += 1
-                    add_activity_log(call.from_user.id, "admin_cleanup_bot", f"Cleaned up stopped/error bot: {filename}")
-                except Exception as e:
-                    bot.send_message(ADMIN_ID, f"⚠️ خطأ مطور - تنظيف: فشل حذف الملف {filename} أثناء التنظيف")
-            bot.send_message(call.message.chat.id, f"تم تنظيف {cleaned_count} بوت متوقف/بخطأ بنجاح.")
+    elif action == 'bots':
+        bots = get_all_hosted_bots_db()
+        if bots:
+            msg = "🤖 جميع البوتات المستضافة:\n\n"
+            for b in bots[:20]:
+                filename, status, user_id, pid, last_started, start_count, bot_username, bot_name = b
+                status_emoji = "🟢" if status == 'running' else "🔴"
+                msg += f"{status_emoji} {filename}\n"
+                msg += f"   المستخدم: {user_id} | @{bot_username}\n"
+                msg += f"   PID: {pid or 'N/A'}\n\n"
+            
+            if len(bots) > 20:
+                msg += f"\n... و {len(bots) - 20} بوت آخر"
         else:
-            bot.send_message(call.message.chat.id, "لا توجد بوتات متوقفة أو بها أخطاء للتنظيف.")
-        bot.answer_callback_query(call.id)
-
-# --- 9. معالجة مدخلات المطور ---
-@bot.message_handler(func=lambda message: is_admin(message.from_user.id) and user_states.get(message.from_user.id) == 'awaiting_admin_stop_bot_filename')
-def handle_admin_stop_bot_filename(message):
-    filename = message.text.strip()
-    if terminate_process(filename):
-        bot.send_message(message.chat.id, f"تم إيقاف البوت {filename} بنجاح.")
-        add_activity_log(message.from_user.id, "admin_stopped_bot", f"Filename: {filename}")
-    else:
-        bot.send_message(message.chat.id, f"البوت {filename} ليس قيد التشغيل أو غير موجود.")
-    user_states[message.from_user.id] = None
-
-@bot.message_handler(func=lambda message: is_admin(message.from_user.id) and user_states.get(message.from_user.id) == 'awaiting_admin_delete_bot_filename')
-def handle_admin_delete_bot_filename(message):
-    filename = message.text.strip()
-    file_path = os.path.join(UPLOADED_BOTS_DIR, filename)
-
-    if os.path.exists(file_path):
-        if terminate_process(filename):
-            bot.send_message(message.chat.id, f"تم إيقاف البوت {filename} قبل الحذف.")
+            msg = "📭 لا توجد بوتات مستضافة."
         
-        try:
-            os.remove(file_path)
-            if os.path.exists(os.path.join(UPLOADED_BOTS_DIR, f"{filename}.stdout")):
-                os.remove(os.path.join(UPLOADED_BOTS_DIR, f"{filename}.stdout"))
-            if os.path.exists(os.path.join(UPLOADED_BOTS_DIR, f"{filename}.stderr")):
-                os.remove(os.path.join(UPLOADED_BOTS_DIR, f"{filename}.stderr"))
-
-            delete_hosted_bot_db(filename)
-            bot.send_message(message.chat.id, f"تم حذف البوت {filename} بنجاح من الخادم وقاعدة البيانات.")
-            add_activity_log(message.from_user.id, "admin_deleted_bot", f"Filename: {filename}")
-        except Exception as e:
-            bot.send_message(message.chat.id, f"حدث خطأ أثناء حذف البوت {filename}: {e}")
-            bot.send_message(ADMIN_ID, f"⚠️ خطأ مطور - حذف بوت: فشل حذف الملف {filename}")
-    else:
-        bot.send_message(message.chat.id, f"الملف {filename} غير موجود في مجلد البوتات المستضافة.")
-    user_states[message.from_user.id] = None
-
-@bot.message_handler(func=lambda message: is_admin(message.from_user.id) and user_states.get(message.from_user.id) == 'awaiting_admin_ban_user_id')
-def handle_admin_ban_user_id(message):
-    try:
-        user_id_to_ban = int(message.text.strip())
-        if user_id_to_ban == ADMIN_ID:
-            bot.send_message(message.chat.id, "لا يمكنك حظر نفسك يا مطور!")
+        bot.send_message(call.message.chat.id, msg)
+    
+    elif action == 'users':
+        users = db_execute("SELECT user_id, username, security_score, total_uploads FROM users ORDER BY total_uploads DESC LIMIT 20", fetch_all=True)
+        if users:
+            msg = "👥 المستخدمين:\n\n"
+            for u in users:
+                msg += f"• {u[0]} (@{u[1]})\n"
+                msg += f"   نقاط الأمان: {u[2]} | الرفعات: {u[3]}\n"
         else:
-            ban_user_db(user_id_to_ban, "تم الحظر يدويا بواسطة المطور.")
-            bot.send_message(message.chat.id, f"تم حظر المستخدم ذو الـ ID {user_id_to_ban} بنجاح (حظر دائم).")
-            add_activity_log(message.from_user.id, "admin_banned_user", f"User ID: {user_id_to_ban}")
-            try:
-                bot.send_message(user_id_to_ban, "لقد تم حظرك من استخدام هذا البوت بواسطة المطور. يرجى التواصل معه لفك الحظر: @llllllIlIlIlIlIlIlIl")
-            except Exception as e:
-                print(f"Failed to send ban message to user {user_id_to_ban}: {e}")
-                bot.send_message(message.chat.id, f"لم أتمكن من إرسال رسالة للمستخدم المحظور (قد يكون قد حظر البوت)")
-    except ValueError:
-        bot.send_message(message.chat.id, "معرف المستخدم غير صالح. يرجى إدخال رقم صحيح.")
-    user_states[message.from_user.id] = None
-
-@bot.message_handler(func=lambda message: is_admin(message.from_user.id) and user_states.get(message.from_user.id) == 'awaiting_admin_unban_user_id')
-def handle_admin_unban_user_id(message):
-    try:
-        user_id_to_unban = int(message.text.strip())
-        if unban_user_db(user_id_to_unban):
-            bot.send_message(message.chat.id, f"تم فك حظر المستخدم ذو الـ ID {user_id_to_unban} بنجاح.")
-            add_activity_log(message.from_user.id, "admin_unbanned_user", f"User ID: {user_id_to_unban}")
-            try:
-                bot.send_message(user_id_to_unban, "تم فك الحظر عنك. يمكنك الآن استخدام البوت.")
-            except Exception as e:
-                print(f"Failed to send unban message to user {user_id_to_unban}: {e}")
-                bot.send_message(message.chat.id, f"لم أتمكن من إرسال رسالة للمستخدم بعد فك الحظر (قد يكون قد حظر البوت)")
-        else:
-            bot.send_message(message.chat.id, f"المستخدم ذو الـ ID {user_id_to_unban} ليس محظورًا أصلاً.")
-    except ValueError:
-        bot.send_message(message.chat.id, "معرف المستخدم غير صالح. يرجى إدخال رقم صحيح.")
-    user_states[message.from_user.id] = None
-
-@bot.message_handler(func=lambda message: is_admin(message.from_user.id) and user_states.get(message.from_user.id) == 'awaiting_admin_view_file_filename')
-def handle_admin_view_file_filename(message):
-    filename = message.text.strip()
-    file_path = os.path.join(UPLOADED_BOTS_DIR, filename)
-
-    if os.path.exists(file_path) and os.path.isfile(file_path):
-        try:
-            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
-                if len(content) > 4000:
-                    bot.send_message(message.chat.id, f"محتوى الملف {filename} (مقتطع):\n{content[:3900]}...")
-                else:
-                    bot.send_message(message.chat.id, f"محتوى الملف {filename}:\n{content}")
-            add_activity_log(message.from_user.id, "admin_viewed_file", f"Filename: {filename}")
-        except Exception as e:
-            bot.send_message(message.chat.id, f"حدث خطأ أثناء قراءة الملف {filename}: {e}")
-            bot.send_message(ADMIN_ID, f"⚠️ خطأ مطور - قراءة ملف: فشلت قراءة {filename}")
-    else:
-        bot.send_message(message.chat.id, f"الملف {filename} غير موجود أو ليس ملفًا صالحًا في مجلد البوتات المستضافة.")
-    user_states[message.from_user.id] = None
-
-@bot.message_handler(func=lambda message: is_admin(message.from_user.id) and user_states.get(message.from_user.id) == 'awaiting_admin_shell_command')
-def handle_admin_shell_command(message):
-    command = message.text.strip()
-    if not command:
-        bot.send_message(message.chat.id, "لم يتم إدخال أمر. يرجى إرسال الأمر الذي تريد تنفيذه.")
-        user_states[message.from_user.id] = None
-        return
+            msg = "📭 لا يوجد مستخدمين."
         
-    try:
-        process_result = subprocess.run(
-            command, 
-            shell=True, 
-            capture_output=True, 
-            text=True, 
-            check=False, 
-            timeout=30
+        bot.send_message(call.message.chat.id, msg)
+    
+    elif action == 'banned':
+        banned = get_banned_users_db()
+        if banned:
+            msg = "🚫 المستخدمين المحظورين:\n\n"
+            for b in banned:
+                user_id, username, reason, temp_until = b
+                msg += f"• {user_id} (@{username})\n"
+                msg += f"   السبب: {reason}\n"
+                if temp_until:
+                    msg += f"   حتى: {temp_until}\n"
+                msg += "\n"
+        else:
+            msg = "✅ لا يوجد مستخدمين محظورين."
+        
+        bot.send_message(call.message.chat.id, msg)
+    
+    elif action == 'security_logs':
+        logs = db_execute(
+            "SELECT timestamp, user_id, action, severity, details FROM security_logs ORDER BY timestamp DESC LIMIT 20",
+            fetch_all=True
         )
-        output = process_result.stdout
-        error = process_result.stderr
-
-        response_message = f"مخرجات الأمر {command}:\n{output[:3000] if output else 'لا توجد مخرجات'}"
-        
-        if error:
-            response_message += f"\nالأخطاء (إن وجدت):\n{error[:1000]}"
-        
-        if len(response_message) > 4000:
-            bot.send_message(message.chat.id, response_message[:4000] + "\n...")
+        if logs:
+            msg = "📜 سجل الأمان (آخر 20):\n\n"
+            for log in logs:
+                msg += f"🕒 {log[0]}\n"
+                msg += f"   [{log[3]}] المستخدم: {log[1]}\n"
+                msg += f"   {log[2]}: {log[4][:50]}...\n\n"
         else:
-            bot.send_message(message.chat.id, response_message)
-        add_activity_log(message.from_user.id, "admin_executed_shell_command", f"Command: {command}")
-
-    except subprocess.TimeoutExpired:
-        bot.send_message(message.chat.id, f"تنفيذ الأمر {command} تجاوز المهلة المحددة (30 ثانية)")
-        bot.send_message(ADMIN_ID, f"⚠️ تنبيه مطور - أمر تجاوز المهلة: الأمر {command} تجاوز المهلة عند تنفيذه")
-        add_activity_log(message.from_user.id, "admin_shell_command_timeout", f"Command: {command}")
-    except Exception as e:
-        bot.send_message(message.chat.id, f"حدث خطأ أثناء تنفيذ الأمر: {e}")
-        bot.send_message(ADMIN_ID, f"⚠️ خطأ مطور - تنفيذ أمر: حدث خطأ أثناء تنفيذ الأمر {command}")
-        add_activity_log(message.from_user.id, "admin_shell_command_error", f"Command: {command}, Error: {e}")
+            msg = "📭 لا توجد سجلات أمنية."
+        
+        if len(msg) > 4000:
+            msg = msg[:4000] + "..."
+        
+        bot.send_message(call.message.chat.id, msg)
     
-    user_states[message.from_user.id] = None
-
-# --- 10. التعامل مع الرسائل النصية الأخرى ---
-@bot.message_handler(func=lambda message: True)
-def echo_all(message):
-    user_id = message.from_user.id
-    user_data = get_user_data(user_id)
-    if user_data and user_data['is_banned']:
-        if user_data['temp_ban_until'] and user_data['temp_ban_until'] > datetime.now():
-            remaining_time = user_data['temp_ban_until'] - datetime.now()
-            bot.send_message(message.chat.id, f"عذرًا، أنت محظور مؤقتًا حتى: {user_data['temp_ban_until'].strftime('%Y-%m-%d %H:%M:%S')} (المتبقي: {str(remaining_time).split('.')[0]}). السبب: {user_data['ban_reason']}")
+    elif action == 'activity_logs':
+        logs = db_execute(
+            "SELECT timestamp, user_id, action, details FROM activity_logs ORDER BY timestamp DESC LIMIT 20",
+            fetch_all=True
+        )
+        if logs:
+            msg = "📋 سجل النشاط (آخر 20):\n\n"
+            for log in logs:
+                msg += f"🕒 {log[0]}\n"
+                msg += f"   المستخدم: {log[1]} | {log[2]}\n"
+                if log[3]:
+                    msg += f"   {log[3][:50]}\n"
+                msg += "\n"
         else:
-            if user_data['temp_ban_until']:
-                unban_user_db(user_id)
-                bot.send_message(message.chat.id, "تم فك الحظر عنك تلقائياً. أهلاً بك مرة أخرى!")
-                add_activity_log(ADMIN_ID, "auto_unban", f"User {user_id} unbanned automatically.")
-            else:
-                bot.send_message(message.chat.id, f"عذرًا، أنت محظور من استخدام هذا البوت بسبب: {user_data['ban_reason']}. يرجى التواصل مع المطور: @llllllIlIlIlIlIlIlIl")
+            msg = "📭 لا توجد سجلات."
+        
+        if len(msg) > 4000:
+            msg = msg[:4000] + "..."
+        
+        bot.send_message(call.message.chat.id, msg)
+    
+    elif action == 'system':
+        stats = resource_monitor.get_system_stats()
+        
+        msg = f"""💻 حالة النظام:
+
+⚙️ المعالج: {stats['cpu_percent']:.1f}%
+💾 الذاكرة: {stats['ram_used_mb']:.0f}MB / {stats['ram_total_mb']:.0f}MB ({stats['ram_percent']:.1f}%)
+📀 القرص: {stats['disk_percent']:.1f}%
+
+🤖 العمليات المراقبة: {stats['active_processes']}
+"""
+        bot.send_message(call.message.chat.id, msg)
+    
+    elif action == 'reboot_all':
+        bots = get_all_hosted_bots_db()
+        rebooted = 0
+        
+        for b in bots:
+            filename = b[0]
+            user_id = b[2]
+            
+            terminate_process(filename)
+            
+            sandbox = sandbox_manager.get_user_sandbox(user_id)
+            file_path = os.path.join(sandbox['bots'], filename)
+            
+            if os.path.exists(file_path):
+                try:
+                    bot_stdout = os.path.join(sandbox['logs'], f"{filename}.stdout")
+                    bot_stderr = os.path.join(sandbox['logs'], f"{filename}.stderr")
+                    
+                    with open(bot_stdout, 'w') as stdout_f, open(bot_stderr, 'w') as stderr_f:
+                        process = subprocess.Popen(
+                            ['python3', file_path],
+                            cwd=sandbox['bots'],
+                            stdout=stdout_f,
+                            stderr=stderr_f,
+                            close_fds=True,
+                            start_new_session=True
+                        )
+                        
+                        running_processes[filename] = process
+                        resource_monitor.add_process(filename, process.pid, user_id)
+                        update_hosted_bot_status_db(filename, 'running', process.pid)
+                        rebooted += 1
+                except Exception:
+                    pass
+        
+        bot.send_message(call.message.chat.id, f"✅ تم إعادة تشغيل {rebooted} بوت من أصل {len(bots)}.")
+        add_activity_log(call.from_user.id, "admin_reboot_all", f"Rebooted: {rebooted}")
+    
+    bot.answer_callback_query(call.id)
+
+@bot.message_handler(commands=['ban'])
+def admin_ban_user(message):
+    """حظر مستخدم"""
+    if not is_admin(message.from_user.id):
         return
-
-    if is_admin(user_id) and user_states.get(user_id) in [
-        'awaiting_admin_stop_bot_filename', 'awaiting_admin_delete_bot_filename',
-        'awaiting_admin_ban_user_id', 'awaiting_admin_unban_user_id',
-        'awaiting_admin_view_file_filename', 'awaiting_admin_shell_command'
-    ]:
+    
+    parts = message.text.split()
+    if len(parts) < 2:
+        bot.send_message(message.chat.id, "استخدام: /ban <user_id> [reason]")
         return
-
-    if not is_subscribed(user_id, REQUIRED_CHANNEL_ID) and message.text not in ['التحقق من الاشتراك ✅', '/start']:
-        send_welcome(message)
-        return
-
-    if user_states.get(message.chat.id) != 'awaiting_file':
-        bot.send_message(message.chat.id, "الرجاء استخدام الأزرار المتاحة للتنقل أو كتابة /help للمساعدة. للمطور: /admin_panel")
-
-# --- 11. تشغيل المراقبة في الخلفية ---
-def run_monitor():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(monitor_bot_resources())
-
-# --- 12. التشغيل الرئيسي ---
-if __name__ == '__main__':
-    if not API_TOKEN:
-        print("خطأ: لم يتم تعيين 'BOT_TOKEN'")
-        exit(1)
-
-    init_db()
-
-    print("جاري تهيئة البوتات المستضافة...")
-    all_hosted_bots = get_all_hosted_bots_db()
-    for filename, status, user_id, pid, last_started, start_count in all_hosted_bots:
-        if status == 'running':
-            update_hosted_bot_status_db(filename, 'stopped', error_log="Bot status reset on main app restart.")
-            print(f"Bot {filename} status reset to 'stopped' due to restart.")
-
-    print("بدء تشغيل مراقبة الموارد في الخيط الخلفي...")
-    monitor_thread = threading.Thread(target=run_monitor, daemon=True)
-    monitor_thread.start()
-
-    print("البوت بدأ العمل في وضع Polling...")
-    print("البوت يعمل الآن! استخدم Ctrl+C لإيقافه.")
-    print(f"👑 المطور: {ADMIN_ID} (@llllllIlIlIlIlIlIlIl)")
     
     try:
-        bot.infinity_polling(timeout=60, long_polling_timeout=60)
-    except KeyboardInterrupt:
-        print("\nجاري إيقاف البوت...")
-        for filename in list(running_processes.keys()):
-            terminate_process(filename)
-        print("تم إيقاف جميع البوتات المستضافة.")
-    except Exception as e:
-        print(f"حدث خطأ أثناء تشغيل البوت: {e}")
+        target_id = int(parts[1])
+        reason = ' '.join(parts[2:]) if len(parts) > 2 else "Admin ban"
+        
+        ban_user_db(target_id, reason)
+        
+        # إيقاف جميع بوتات المستخدم
+        bots = get_all_hosted_bots_db(target_id)
+        if bots:
+            for b in bots:
+                terminate_process(b[0])
+        
+        bot.send_message(message.chat.id, f"✅ تم حظر المستخدم {target_id}")
+        add_security_log(message.from_user.id, "admin_ban", f"Banned: {target_id}, Reason: {reason}")
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ معرف المستخدم غير صالح.")
+
+@bot.message_handler(commands=['unban'])
+def admin_unban_user(message):
+    """فك حظر مستخدم"""
+    if not is_admin(message.from_user.id):
+        return
+    
+    parts = message.text.split()
+    if len(parts) < 2:
+        bot.send_message(message.chat.id, "استخدام: /unban <user_id>")
+        return
+    
+    try:
+        target_id = int(parts[1])
+        unban_user_db(target_id)
+        bot.send_message(message.chat.id, f"✅ تم فك حظر المستخدم {target_id}")
+        add_activity_log(message.from_user.id, "admin_unban", f"Unbanned: {target_id}")
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ معرف المستخدم غير صالح.")
+
+# ═══════════════════════════════════════════════════════════════════
+# 🔄 مراقبة الموارد في الخلفية
+# ═══════════════════════════════════════════════════════════════════
+
+def resource_monitor_loop():
+    """حلقة مراقبة الموارد"""
+    while True:
+        try:
+            time.sleep(MONITOR_INTERVAL_SECONDS)
+            
+            for filename in list(running_processes.keys()):
+                killed, violations = resource_monitor.kill_if_exceeded(filename)
+                
+                if killed:
+                    bot_info = db_execute(
+                        "SELECT user_id FROM hosted_bots WHERE filename = ?",
+                        (filename,), fetch_one=True
+                    )
+                    
+                    if bot_info:
+                        user_id = bot_info[0]
+                        violation_msg = ', '.join(violations)
+                        
+                        ban_user_db(user_id, f"Resource abuse: {violation_msg}", is_temp=True, duration_minutes=SECURITY_BAN_DURATION_MINUTES)
+                        add_security_log(user_id, "resource_abuse", f"File: {filename}, Violations: {violation_msg}", severity='CRITICAL')
+                        
+                        try:
+                            bot.send_message(
+                                user_id,
+                                f"⚠️ تم إيقاف بوتك {filename} وحظرك مؤقتاً!\n\n"
+                                f"السبب: تجاوز حدود الموارد\n"
+                                f"التفاصيل: {violation_msg}"
+                            )
+                        except:
+                            pass
+                        
+                        if ADMIN_ID:
+                            try:
+                                bot.send_message(
+                                    ADMIN_ID,
+                                    f"🚨 تنبيه - تجاوز موارد\n\n"
+                                    f"المستخدم: {user_id}\n"
+                                    f"الملف: {filename}\n"
+                                    f"السبب: {violation_msg}"
+                                )
+                            except:
+                                pass
+                
+                # التحقق من توقف العمليات
+                check_result = resource_monitor.check_process(filename)
+                if check_result.get('status') == 'stopped':
+                    if filename in running_processes:
+                        del running_processes[filename]
+                    resource_monitor.remove_process(filename)
+                    update_hosted_bot_status_db(filename, 'stopped', error_log=check_result.get('reason'))
+                    
+        except Exception as e:
+            print(f"Monitor error: {e}")
+
+# ═══════════════════════════════════════════════════════════════════
+# 🚀 تشغيل البوت
+# ═══════════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    print("🚀 جاري تهيئة النظام...")
+    
+    # تهيئة قاعدة البيانات
+    init_db()
+    print("✅ تم تهيئة قاعدة البيانات")
+    
+    # بدء مراقبة الموارد في خيط منفصل
+    monitor_thread = threading.Thread(target=resource_monitor_loop, daemon=True)
+    monitor_thread.start()
+    print("✅ تم بدء مراقبة الموارد")
+    
+    # استعادة البوتات الشغالة
+    running_bots = db_execute(
+        "SELECT filename, user_id, process_pid FROM hosted_bots WHERE status = 'running'",
+        fetch_all=True
+    )
+    
+    if running_bots:
+        print(f"🔄 جاري استعادة {len(running_bots)} بوت...")
+        for bot_data in running_bots:
+            filename, user_id, old_pid = bot_data
+            sandbox = sandbox_manager.get_user_sandbox(user_id)
+            file_path = os.path.join(sandbox['bots'], filename)
+            
+            if os.path.exists(file_path):
+                try:
+                    bot_stdout = os.path.join(sandbox['logs'], f"{filename}.stdout")
+                    bot_stderr = os.path.join(sandbox['logs'], f"{filename}.stderr")
+                    
+                    with open(bot_stdout, 'a') as stdout_f, open(bot_stderr, 'a') as stderr_f:
+                        process = subprocess.Popen(
+                            ['python3', file_path],
+                            cwd=sandbox['bots'],
+                            stdout=stdout_f,
+                            stderr=stderr_f,
+                            close_fds=True,
+                            start_new_session=True
+                        )
+                        
+                        running_processes[filename] = process
+                        resource_monitor.add_process(filename, process.pid, user_id)
+                        update_hosted_bot_status_db(filename, 'running', process.pid)
+                        print(f"   ✅ {filename}")
+                except Exception as e:
+                    print(f"   ❌ {filename}: {e}")
+                    update_hosted_bot_status_db(filename, 'error', error_log=str(e))
+            else:
+                update_hosted_bot_status_db(filename, 'stopped', error_log="File not found")
+    
+    print("=" * 50)
+    print("🤖 نظام استضافة البوتات الآمن")
+    print("=" * 50)
+    print(f"• المطور: {ADMIN_ID}")
+    print(f"• القناة: {REQUIRED_CHANNEL_ID}")
+    print(f"• حد البوتات: {MAX_BOTS_PER_USER}")
+    print(f"• حد RAM: {RESOURCE_RAM_LIMIT_MB}MB")
+    print(f"• حد CPU: {RESOURCE_CPU_LIMIT_PERCENT}%")
+    print("=" * 50)
+    print("✅ البوت جاهز للعمل!")
+    
+    # تشغيل البوت مع معالجة خطأ 409
+    import requests as req
+    
+    # إلغاء webhook قديم إن وجد
+    try:
+        req.get(f"https://api.telegram.org/bot{API_TOKEN}/deleteWebhook?drop_pending_updates=true", timeout=10)
+        time.sleep(2)
+    except:
+        pass
+    
+    while True:
+        try:
+            bot.infinity_polling(timeout=60, long_polling_timeout=60, skip_pending=True)
+        except Exception as e:
+            error_str = str(e)
+            if "409" in error_str or "Conflict" in error_str:
+                print("⚠️ خطأ 409: جاري إعادة المحاولة...")
+                time.sleep(3)
+            else:
+                print(f"❌ خطأ: {e}")
+                time.sleep(5)
