@@ -26,8 +26,8 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 # ⚙️ إعدادات البوت الأساسية
 # ═══════════════════════════════════════════════════════════════════
 
-API_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
+API_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8156912979:AAG7S6tn1MaTizz-Gm6gnWz6XvJ8904Rwgc")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "7627857345"))
 REQUIRED_CHANNEL_ID = os.environ.get("REQUIRED_CHANNEL_ID", "@pythonyemen1")
 ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY", "")
 
