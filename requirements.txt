@@ -1,2 +1,6 @@
 pyTelegramBotAPI==4.19.2
-requests==2.31.0
+psutil==5.9.8
+Pillow==10.3.0           # للمعالجة الصور (اختياري)
+requests==2.31.0         # لطلبات HTTP (اختياري)
+python-dotenv==1.0.0     # لإدارة المتغيرات البيئية (اختياري)
+aiohttp==3.9.3          # لدعم asyncio محسن (اختياري)
