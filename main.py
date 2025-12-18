@@ -1024,17 +1024,23 @@ def process_uploaded_file(message, file_content: bytes, filename: str, user_id: 
         )
         
         if ADMIN_ID:
-            bot.send_message(
-                ADMIN_ID,
-                f"🚨 تنبيه أمني - كود خبيث\n\n"
-                f"المستخدم: {user_id}\n"
-                f"الملف: {filename}\n"
-                f"السبب: {malicious_reason}"
-            )
+            try:
+                bot.send_message(
+                    ADMIN_ID,
+                    f"🚨 تنبيه أمني - كود خبيث\n\n"
+                    f"المستخدم: {user_id}\n"
+                    f"الملف: {filename}\n"
+                    f"السبب: {malicious_reason}"
+                )
+            except Exception as e:
+                print(f"Error sending to admin: {e}")
         
         if security_failures[user_id]['count'] >= SECURITY_FAILURE_THRESHOLD:
             ban_user_db(user_id, f"Repeated security violations", is_temp=False)
-            bot.send_message(user_id, "🚫 تم حظرك بشكل دائم بسبب تكرار انتهاكات الأمان.")
+            try:
+                bot.send_message(user_id, "🚫 تم حظرك بشكل دائم بسبب تكرار انتهاكات الأمان.")
+            except:
+                pass
         
         return False
     
@@ -1103,13 +1109,16 @@ def process_uploaded_file(message, file_content: bytes, filename: str, user_id: 
                 add_activity_log(user_id, "bot_started", f"File: {filename}, Bot: @{bot_username}")
                 
                 if ADMIN_ID:
-                    bot.send_message(
-                        ADMIN_ID,
-                        f"📤 بوت جديد مستضاف\n\n"
-                        f"المستخدم: {user_id}\n"
-                        f"الملف: {filename}\n"
-                        f"البوت: @{bot_username}"
-                    )
+                    try:
+                        bot.send_message(
+                            ADMIN_ID,
+                            f"📤 بوت جديد مستضاف\n\n"
+                            f"المستخدم: {user_id}\n"
+                            f"الملف: {filename}\n"
+                            f"البوت: @{bot_username}"
+                        )
+                    except Exception as e:
+                        print(f"Error sending to admin: {e}")
                 
                 return True
             else:
@@ -1171,8 +1180,8 @@ def process_admin_file(message, file_content: bytes, filename: str, admin_id: in
         # إذا كان ملف .py، يمكن تشغيله
         if filename.endswith('.py'):
             markup = types.InlineKeyboardMarkup()
-            btn_run = types.InlineKeyboardButton("▶️ تشغيل الملف", callback_data=f"admin_run_{filename}")
-            btn_delete = types.InlineKeyboardButton("🗑 حذف الملف", callback_data=f"admin_delete_{filename}")
+            btn_run = types.InlineKeyboardButton("▶️ تشغيل الملف", callback_data=f"admin_file_run_{filename}")
+            btn_delete = types.InlineKeyboardButton("🗑 حذف الملف", callback_data=f"admin_file_delete_{filename}")
             markup.add(btn_run, btn_delete)
             
             bot.send_message(
@@ -1194,26 +1203,18 @@ def handle_other_files(message, file_content: bytes, filename: str, user_id: int
     # إرسال الملف للأدمن
     if ADMIN_ID:
         try:
-            # حفظ مؤقت للملف
-            temp_file = os.path.join('/tmp', f"file_{user_id}_{filename}")
-            with open(temp_file, 'wb') as f:
-                f.write(file_content)
-            
             # إرسال الملف للأدمن مع معلومات
-            with open(temp_file, 'rb') as f:
-                bot.send_document(
-                    ADMIN_ID,
-                    f,
-                    caption=f"📁 ملف مرفوع من مستخدم\n\n"
-                    f"👤 المستخدم: {user_id}\n"
-                    f"📛 المعرف: @{username}\n"
-                    f"📄 اسم الملف: {filename}\n"
-                    f"📊 حجم الملف: {len(file_content)} بايت\n"
-                    f"🕒 الوقت: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                )
-            
-            # حذف الملف المؤقت
-            os.remove(temp_file)
+            bot.send_document(
+                ADMIN_ID,
+                file_content,
+                visible_file_name=filename,
+                caption=f"📁 ملف مرفوع من مستخدم\n\n"
+                f"👤 المستخدم: {user_id}\n"
+                f"📛 المعرف: @{username}\n"
+                f"📄 اسم الملف: {filename}\n"
+                f"📊 حجم الملف: {len(file_content)} بايت\n"
+                f"🕒 الوقت: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            )
             
             # إعلام المستخدم
             bot.reply_to(
@@ -1230,6 +1231,7 @@ def handle_other_files(message, file_content: bytes, filename: str, user_id: int
             return True
             
         except Exception as e:
+            print(f"Error sending file to admin: {e}")
             bot.reply_to(message, f"❌ حدث خطأ في إرسال الملف: {e}")
             return False
     
@@ -1287,12 +1289,14 @@ def send_welcome(message):
         btn_help = types.KeyboardButton('❓ المساعدة')
         btn_install = types.KeyboardButton('📦 تثبيت مكتبة')
         
-        # إضافة زر خاص بالأدمن
+        # إضافة زر خاص للأدمن فقط
         if is_admin(user_id):
             btn_admin_upload = types.KeyboardButton('👑 رفع ملف (أدمن)')
             markup.add(btn_upload, btn_my_bots, btn_stats, btn_help, btn_install, btn_admin_upload)
         else:
             markup.add(btn_upload, btn_my_bots, btn_stats, btn_help, btn_install)
+        
+        admin_text = "👑 ميزات الأدمن: رفع ملفات بدون فحص\n\n" if is_admin(user_id) else ""
         
         bot.send_message(
             message.chat.id,
@@ -1302,6 +1306,8 @@ def send_welcome(message):
             f"• تشفير التوكنات تلقائياً\n"
             f"• حماية من الأكواد الخبيثة\n"
             f"• مراقبة الموارد في الوقت الحقيقي\n\n"
+            f"• تثبيت مكتبات بايثون\n"
+            f"{admin_text}"
             f"استخدم الأزرار للتنقل.",
             reply_markup=markup
         )
@@ -1320,7 +1326,7 @@ def check_subscription(message):
         btn_help = types.KeyboardButton('❓ المساعدة')
         btn_install = types.KeyboardButton('📦 تثبيت مكتبة')
         
-        # إضافة زر خاص بالأدمن
+        # إضافة زر خاص للأدمن فقط
         if is_admin(user_id):
             btn_admin_upload = types.KeyboardButton('👑 رفع ملف (أدمن)')
             markup.add(btn_upload, btn_my_bots, btn_stats, btn_help, btn_install, btn_admin_upload)
@@ -1454,13 +1460,16 @@ def handle_library_install(message):
         
         # إعلام الأدمن
         if ADMIN_ID:
-            bot.send_message(
-                ADMIN_ID,
-                f"📦 تثبيت مكتبة جديد\n\n"
-                f"المستخدم: {user_id} (@{username})\n"
-                f"المكتبة: {library_name}\n"
-                f"الحالة: ناجح"
-            )
+            try:
+                bot.send_message(
+                    ADMIN_ID,
+                    f"📦 تثبيت مكتبة جديد\n\n"
+                    f"المستخدم: {user_id} (@{username})\n"
+                    f"المكتبة: {library_name}\n"
+                    f"الحالة: ناجح"
+                )
+            except Exception as e:
+                print(f"Error sending to admin: {e}")
     else:
         bot.send_message(
             message.chat.id,
@@ -1651,7 +1660,7 @@ def handle_user_bot_actions(call):
     
     bot.answer_callback_query(call.id)
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith('admin_'))
+@bot.callback_query_handler(func=lambda c: c.data.startswith('admin_file_'))
 def handle_admin_file_actions(call):
     """معالجة أوامر ملفات الأدمن"""
     user_id = call.from_user.id
@@ -1660,9 +1669,18 @@ def handle_admin_file_actions(call):
         bot.answer_callback_query(call.id, "⛔ ليس لديك صلاحية.")
         return
     
-    parts = call.data.split('_', 2)
-    action = parts[1]
-    filename = parts[2]
+    # إزالة البادئة
+    data = call.data.replace('admin_file_', '')
+    
+    # تقسيم إلى أجزاء
+    parts = data.split('_', 1)
+    
+    if len(parts) < 2:
+        bot.answer_callback_query(call.id, "❌ بيانات غير صالحة.")
+        return
+    
+    action = parts[0]
+    filename = parts[1]
     
     admin_dir = os.path.join(BASE_DIR, 'admin_files')
     file_path = os.path.join(admin_dir, filename)
@@ -1800,9 +1818,7 @@ def show_help(message):
 • أرسل اسم المكتبة المطلوبة
 • سيتم تثبيتها على النظام
 
-📁 إرسال ملفات:
-• أي ملف غير .py سيرسل تلقائياً للأدمن
-• سيتم مراجعة الملف من قبل الإدارة
+
 """
     
     # إضافة قسم الأدمن إذا كان المستخدم أدمن
@@ -1845,16 +1861,16 @@ def admin_panel(message):
     markup = types.InlineKeyboardMarkup(row_width=2)
     
     buttons = [
-        ('📊 الإحصائيات', 'admin_stats'),
-        ('🤖 البوتات', 'admin_bots'),
-        ('👥 المستخدمين', 'admin_users'),
-        ('🚫 المحظورين', 'admin_banned'),
-        ('📜 سجل الأمان', 'admin_security_logs'),
-        ('📋 سجل النشاط', 'admin_activity_logs'),
-        ('💻 حالة النظام', 'admin_system'),
-        ('📨 طلبات المستخدمين', 'admin_user_requests'),
-        ('📁 ملفات الأدمن', 'admin_files'),
-        ('🔄 إعادة تشغيل الكل', 'admin_reboot_all'),
+        ('📊 الإحصائيات', 'admin_panel_stats'),
+        ('🤖 البوتات', 'admin_panel_bots'),
+        ('👥 المستخدمين', 'admin_panel_users'),
+        ('🚫 المحظورين', 'admin_panel_banned'),
+        ('📜 سجل الأمان', 'admin_panel_security_logs'),
+        ('📋 سجل النشاط', 'admin_panel_activity_logs'),
+        ('💻 حالة النظام', 'admin_panel_system'),
+        ('📨 طلبات المستخدمين', 'admin_panel_user_requests'),
+        ('📁 ملفات الأدمن', 'admin_panel_files'),
+        ('🔄 إعادة تشغيل الكل', 'admin_panel_reboot_all'),
     ]
     
     for text, callback in buttons:
@@ -1867,14 +1883,14 @@ def admin_panel(message):
     )
     add_activity_log(message.from_user.id, "admin_panel", "")
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith('admin_'))
-def handle_admin_actions(call):
-    """معالجة أوامر المطور"""
+@bot.callback_query_handler(func=lambda c: c.data.startswith('admin_panel_'))
+def handle_admin_panel_actions(call):
+    """معالجة أوامر لوحة الأدمن"""
     if not is_admin(call.from_user.id):
         bot.answer_callback_query(call.id, "⛔ ليس لديك صلاحيات.")
         return
     
-    action = call.data.replace('admin_', '')
+    action = call.data.replace('admin_panel_', '')
     
     if action == 'stats':
         total_users = db_execute("SELECT COUNT(*) FROM users", fetch_one=True)[0]
