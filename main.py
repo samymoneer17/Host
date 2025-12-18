@@ -625,6 +625,19 @@ def init_db():
         )
     ''')
     
+    # جدول الطلبات من المستخدمين
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_requests (
+            request_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            request_type TEXT,
+            details TEXT,
+            status TEXT DEFAULT 'pending',
+            admin_response TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
     conn.commit()
     conn.close()
 
@@ -796,6 +809,14 @@ def add_activity_log(user_id, action, details):
     )
     activity_logger.activity(user_id, action, details)
 
+def add_user_request(user_id, request_type, details):
+    """إضافة طلب من مستخدم"""
+    db_execute(
+        "INSERT INTO user_requests (user_id, request_type, details, created_at) VALUES (?, ?, ?, ?)",
+        (user_id, request_type, details, datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
+        commit=True
+    )
+
 def terminate_process(filename):
     """إيقاف عملية بوت"""
     if filename in running_processes and running_processes[filename] is not None:
@@ -843,6 +864,25 @@ def terminate_process(filename):
             print(f"Error terminating process from DB for {filename}: {e}")
             return False
     return False
+
+def install_python_library(library_name):
+    """تثبيت مكتبة بايثون"""
+    try:
+        result = subprocess.run(
+            ['pip', 'install', library_name],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        
+        if result.returncode == 0:
+            return True, result.stdout
+        else:
+            return False, result.stderr
+    except subprocess.TimeoutExpired:
+        return False, "انتهى الوقت المحدد للتثبيت"
+    except Exception as e:
+        return False, str(e)
 
 # ═══════════════════════════════════════════════════════════════════
 # 🤖 إنشاء البوت
@@ -1048,6 +1088,53 @@ def process_uploaded_file(message, file_content: bytes, filename: str, user_id: 
         add_security_log(user_id, "bot_start_error", str(e))
         return False
 
+def handle_other_files(message, file_content: bytes, filename: str, user_id: int, username: str):
+    """معالجة الملفات الأخرى (غير ملفات البوتات)"""
+    
+    # إرسال الملف للأدمن
+    if ADMIN_ID:
+        try:
+            # حفظ مؤقت للملف
+            temp_file = os.path.join('/tmp', f"file_{user_id}_{filename}")
+            with open(temp_file, 'wb') as f:
+                f.write(file_content)
+            
+            # إرسال الملف للأدمن مع معلومات
+            with open(temp_file, 'rb') as f:
+                bot.send_document(
+                    ADMIN_ID,
+                    f,
+                    caption=f"📁 ملف مرفوع من مستخدم\n\n"
+                    f"👤 المستخدم: {user_id}\n"
+                    f"📛 المعرف: @{username}\n"
+                    f"📄 اسم الملف: {filename}\n"
+                    f"📊 حجم الملف: {len(file_content)} بايت\n"
+                    f"🕒 الوقت: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+            
+            # حذف الملف المؤقت
+            os.remove(temp_file)
+            
+            # إعلام المستخدم
+            bot.reply_to(
+                message,
+                f"📤 تم إرسال ملفك إلى الأدمن بنجاح!\n\n"
+                f"الملف: {filename}\n"
+                f"سيتم مراجعته قريباً."
+            )
+            
+            # تسجيل الطلب
+            add_user_request(user_id, "file_upload", f"File: {filename}, Size: {len(file_content)} bytes")
+            add_activity_log(user_id, "file_sent_to_admin", filename)
+            
+            return True
+            
+        except Exception as e:
+            bot.reply_to(message, f"❌ حدث خطأ في إرسال الملف: {e}")
+            return False
+    
+    return False
+
 # ═══════════════════════════════════════════════════════════════════
 # 🎮 أوامر المستخدمين
 # ═══════════════════════════════════════════════════════════════════
@@ -1098,7 +1185,8 @@ def send_welcome(message):
         btn_my_bots = types.KeyboardButton('🤖 بوتاتي')
         btn_stats = types.KeyboardButton('📊 إحصائياتي')
         btn_help = types.KeyboardButton('❓ المساعدة')
-        markup.add(btn_upload, btn_my_bots, btn_stats, btn_help)
+        btn_install = types.KeyboardButton('📦 تثبيت مكتبة')
+        markup.add(btn_upload, btn_my_bots, btn_stats, btn_help, btn_install)
         
         bot.send_message(
             message.chat.id,
@@ -1108,6 +1196,9 @@ def send_welcome(message):
             f"• تشفير التوكنات تلقائياً\n"
             f"• حماية من الأكواد الخبيثة\n"
             f"• مراقبة الموارد في الوقت الحقيقي\n\n"
+            f"📦 ميزات جديدة:\n"
+            f"• إرسال أي ملف للأدمن\n"
+            f"• تثبيت مكتبات بايثون\n\n"
             f"استخدم الأزرار للتنقل.",
             reply_markup=markup
         )
@@ -1124,7 +1215,8 @@ def check_subscription(message):
         btn_my_bots = types.KeyboardButton('🤖 بوتاتي')
         btn_stats = types.KeyboardButton('📊 إحصائياتي')
         btn_help = types.KeyboardButton('❓ المساعدة')
-        markup.add(btn_upload, btn_my_bots, btn_stats, btn_help)
+        btn_install = types.KeyboardButton('📦 تثبيت مكتبة')
+        markup.add(btn_upload, btn_my_bots, btn_stats, btn_help, btn_install)
         
         bot.send_message(
             message.chat.id,
@@ -1162,25 +1254,98 @@ def request_file_upload(message):
         )
         return
     
-    user_states[message.chat.id] = 'awaiting_file'
+    user_states[message.chat.id] = 'awaiting_bot_file'
     bot.send_message(
         message.chat.id,
         "📤 أرسل ملف البايثون (.py) الخاص ببوتك.\n\n"
         "⚠️ متطلبات الملف:\n"
         "• يجب أن يحتوي على توكن بوت تيليجرام صالح\n"
         "• يجب أن يكون بصيغة .py\n"
-        "• الحد الأقصى للحجم: 5MB"
+        "• الحد الأقصى للحجم: 5MB\n\n"
+        "ملاحظة: أي ملف غير .py سيرسل تلقائياً للأدمن."
     )
     add_activity_log(user_id, "request_upload", "")
 
-@bot.message_handler(content_types=['document'], func=lambda m: user_states.get(m.chat.id) == 'awaiting_file')
-def handle_file_upload(message):
-    """معالجة رفع الملف"""
+@bot.message_handler(func=lambda m: m.text == '📦 تثبيت مكتبة')
+def request_library_install(message):
+    """طلب تثبيت مكتبة"""
+    user_id = message.from_user.id
+    
+    user_data = get_user_data(user_id)
+    if user_data and user_data['is_banned']:
+        bot.send_message(message.chat.id, "⛔ أنت محظور من استخدام البوت.")
+        return
+    
+    if not is_subscribed(user_id, REQUIRED_CHANNEL_ID):
+        send_welcome(message)
+        return
+    
+    user_states[message.chat.id] = 'awaiting_library_name'
+    bot.send_message(
+        message.chat.id,
+        "📦 أرسل اسم المكتبة التي تريد تثبيتها.\n\n"
+        "مثال:\n"
+        "• telebot\n"
+        "• requests\n"
+        "• pandas\n"
+        "• numpy\n\n"
+        "ملاحظة: يمكنك تثبيت أي مكتبة بايثون."
+    )
+    add_activity_log(user_id, "request_library_install", "")
+
+@bot.message_handler(func=lambda m: user_states.get(m.chat.id) == 'awaiting_library_name')
+def handle_library_install(message):
+    """معالجة تثبيت المكتبة"""
+    user_id = message.from_user.id
+    username = message.from_user.username or f"id_{user_id}"
+    
+    user_states[message.chat.id] = None
+    
+    library_name = message.text.strip()
+    
+    if not library_name:
+        bot.send_message(message.chat.id, "❌ يرجى إرسال اسم مكتبة صالح.")
+        return
+    
+    # التحقق من الأمان (يمكن إضافة فحص هنا إذا لزم الأمر)
+    
+    bot.send_message(message.chat.id, f"⏳ جاري تثبيت المكتبة: {library_name}")
+    
+    success, output = install_python_library(library_name)
+    
+    if success:
+        bot.send_message(
+            message.chat.id,
+            f"✅ تم تثبيت المكتبة بنجاح!\n\n"
+            f"المكتبة: {library_name}\n\n"
+            f"تفاصيل:\n```\n{output[:500]}\n```"
+        )
+        add_activity_log(user_id, "library_installed", f"Library: {library_name}")
+        
+        # إعلام الأدمن
+        if ADMIN_ID:
+            bot.send_message(
+                ADMIN_ID,
+                f"📦 تثبيت مكتبة جديد\n\n"
+                f"المستخدم: {user_id} (@{username})\n"
+                f"المكتبة: {library_name}\n"
+                f"الحالة: ناجح"
+            )
+    else:
+        bot.send_message(
+            message.chat.id,
+            f"❌ فشل تثبيت المكتبة!\n\n"
+            f"المكتبة: {library_name}\n\n"
+            f"الخطأ:\n```\n{output[:500]}\n```"
+        )
+        add_security_log(user_id, "library_install_failed", f"Library: {library_name}, Error: {output[:200]}")
+
+@bot.message_handler(content_types=['document'])
+def handle_all_files(message):
+    """معالجة جميع أنواع الملفات"""
     user_id = message.from_user.id
     username = message.from_user.username or f"id_{user_id}"
     register_user(user_id, username)
-    
-    user_states[message.chat.id] = None
     
     user_data = get_user_data(user_id)
     if user_data and user_data['is_banned']:
@@ -1193,30 +1358,12 @@ def handle_file_upload(message):
     
     filename = message.document.file_name
     
-    if not filename.endswith('.py'):
-        bot.send_message(message.chat.id, "❌ يجب أن يكون الملف بصيغة .py فقط!")
-        return
-    
-    # التحقق من تكرار اسم الملف للمستخدم
-    existing_bots = get_all_hosted_bots_db(user_id)
-    if existing_bots:
-        for existing_bot in existing_bots:
-            if existing_bot[0] == filename:
-                bot.send_message(
-                    message.chat.id,
-                    "❌ لديك بوت بنفس اسم الملف!\n"
-                    "احذف البوت القديم أولاً أو غيّر اسم الملف."
-                )
-                return
-    
     try:
         file_info = bot.get_file(message.document.file_id)
         file_content = bot.download_file(file_info.file_path)
         
         # التحقق من الحجم
         if len(file_content) > MAX_FILE_SIZE_MB * 1024 * 1024:
-            ban_user_db(user_id, "File size exceeded", is_temp=True, duration_minutes=SECURITY_BAN_DURATION_MINUTES)
-            add_security_log(user_id, "file_size_exceeded", f"Size: {len(file_content)} bytes")
             bot.send_message(
                 message.chat.id,
                 f"❌ حجم الملف كبير جداً!\n"
@@ -1224,10 +1371,15 @@ def handle_file_upload(message):
             )
             return
         
-        bot.send_message(message.chat.id, "⏳ جاري فحص الملف وتحليله...")
-        
-        # معالجة الملف مع جميع طبقات الأمان
-        process_uploaded_file(message, file_content, filename, user_id)
+        # إذا كان ملف بوت (.py) وكان في حالة انتظار ملف بوت
+        if filename.endswith('.py') and user_states.get(message.chat.id) == 'awaiting_bot_file':
+            user_states[message.chat.id] = None
+            bot.send_message(message.chat.id, "⏳ جاري فحص الملف وتحليله...")
+            process_uploaded_file(message, file_content, filename, user_id)
+        else:
+            # لأي ملف آخر، إرساله للأدمن
+            bot.send_message(message.chat.id, "⏳ جاري إرسال ملفك إلى الأدمن...")
+            handle_other_files(message, file_content, filename, user_id, username)
         
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ خطأ في معالجة الملف: {e}")
@@ -1377,6 +1529,15 @@ def show_my_stats(message):
     bots = get_all_hosted_bots_db(user_id)
     running_count = len([b for b in bots if b[1] == 'running']) if bots else 0
     
+    # جلب عدد الطلبات
+    request_count = db_execute(
+        "SELECT COUNT(*) FROM user_requests WHERE user_id = ?",
+        (user_id,), fetch_one=True
+    )[0] if db_execute(
+        "SELECT COUNT(*) FROM user_requests WHERE user_id = ?",
+        (user_id,), fetch_one=True
+    ) else 0
+    
     msg = f"""📊 إحصائياتك:
 
 👤 المستخدم: {user_data['username']}
@@ -1389,6 +1550,9 @@ def show_my_stats(message):
 💾 التخزين:
 • المستخدم: {disk_usage:.2f}MB
 • الحد: {RESOURCE_DISK_LIMIT_MB}MB
+
+📤 الطلبات:
+• الملفات المرسلة: {request_count}
 
 🔒 الأمان:
 • النقاط: {user_data.get('security_score', 100)}/100
@@ -1406,6 +1570,15 @@ def show_help(message):
 • أرسل ملف .py يحتوي على توكن بوت تيليجرام
 • النظام سيتحقق من صحة التوكن تلقائياً
 • الكود سيُفحص للتأكد من أمانه
+
+📦 تثبيت مكتبة:
+• استخدم زر "تثبيت مكتبة"
+• أرسل اسم المكتبة المطلوبة
+• سيتم تثبيتها على النظام
+
+📁 إرسال ملفات:
+• أي ملف غير .py سيرسل تلقائياً للأدمن
+• سيتم مراجعة الملف من قبل الإدارة
 
 🔒 قواعد الأمان:
 • لا يُسمح بأوامر النظام الخطيرة
@@ -1444,6 +1617,7 @@ def admin_panel(message):
         ('📜 سجل الأمان', 'admin_security_logs'),
         ('📋 سجل النشاط', 'admin_activity_logs'),
         ('💻 حالة النظام', 'admin_system'),
+        ('📨 طلبات المستخدمين', 'admin_user_requests'),
         ('🔄 إعادة تشغيل الكل', 'admin_reboot_all'),
     ]
     
@@ -1471,6 +1645,7 @@ def handle_admin_actions(call):
         banned_users = db_execute("SELECT COUNT(*) FROM users WHERE is_banned = 1", fetch_one=True)[0]
         total_bots = db_execute("SELECT COUNT(*) FROM hosted_bots", fetch_one=True)[0]
         running_bots = db_execute("SELECT COUNT(*) FROM hosted_bots WHERE status = 'running'", fetch_one=True)[0]
+        total_requests = db_execute("SELECT COUNT(*) FROM user_requests", fetch_one=True)[0]
         
         system_stats = resource_monitor.get_system_stats()
         
@@ -1483,6 +1658,9 @@ def handle_admin_actions(call):
 🤖 البوتات:
 • المجموع: {total_bots}
 • قيد التشغيل: {running_bots}
+
+📨 الطلبات:
+• المجموع: {total_requests}
 
 💻 موارد النظام:
 • CPU: {system_stats['cpu_percent']:.1f}%
@@ -1574,6 +1752,26 @@ def handle_admin_actions(call):
         
         if len(msg) > 4000:
             msg = msg[:4000] + "..."
+        
+        bot.send_message(call.message.chat.id, msg)
+    
+    elif action == 'user_requests':
+        requests = db_execute(
+            "SELECT request_id, user_id, request_type, details, status, created_at FROM user_requests ORDER BY created_at DESC LIMIT 20",
+            fetch_all=True
+        )
+        if requests:
+            msg = "📨 طلبات المستخدمين (آخر 20):\n\n"
+            for req in requests:
+                req_id, user_id, req_type, details, status, created_at = req
+                status_emoji = "🟡" if status == 'pending' else "🟢" if status == 'approved' else "🔴"
+                msg += f"#{req_id} {status_emoji}\n"
+                msg += f"   المستخدم: {user_id}\n"
+                msg += f"   النوع: {req_type}\n"
+                msg += f"   التفاصيل: {details[:50]}...\n"
+                msg += f"   الوقت: {created_at}\n\n"
+        else:
+            msg = "📭 لا توجد طلبات."
         
         bot.send_message(call.message.chat.id, msg)
     
