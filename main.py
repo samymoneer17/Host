@@ -638,6 +638,21 @@ def init_db():
         )
     ''')
     
+    # جدول ملفات الأدمن
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS admin_files (
+            file_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            admin_id INTEGER,
+            filename TEXT,
+            file_size INTEGER,
+            file_path TEXT,
+            description TEXT,
+            uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            is_public INTEGER DEFAULT 0,
+            download_count INTEGER DEFAULT 0
+        )
+    ''')
+    
     conn.commit()
     conn.close()
 
@@ -817,6 +832,32 @@ def add_user_request(user_id, request_type, details):
         commit=True
     )
 
+def add_admin_file(admin_id, filename, file_size, file_path, description="", is_public=False):
+    """إضافة ملف أدمن"""
+    db_execute(
+        """INSERT INTO admin_files 
+           (admin_id, filename, file_size, file_path, description, uploaded_at, is_public) 
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (admin_id, filename, file_size, file_path, description, 
+         datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 1 if is_public else 0),
+        commit=True
+    )
+
+def get_admin_files():
+    """جلب ملفات الأدمن"""
+    return db_execute(
+        """SELECT file_id, filename, file_size, description, uploaded_at, is_public, download_count 
+           FROM admin_files ORDER BY uploaded_at DESC""",
+        fetch_all=True
+    )
+
+def increment_download_count(file_id):
+    """زيادة عداد التحميل"""
+    db_execute(
+        "UPDATE admin_files SET download_count = download_count + 1 WHERE file_id = ?",
+        (file_id,), commit=True
+    )
+
 def terminate_process(filename):
     """إيقاف عملية بوت"""
     if filename in running_processes and running_processes[filename] is not None:
@@ -916,8 +957,12 @@ def is_subscribed(user_id, channel_id_str):
 # 📤 معالجة رفع الملفات مع الحماية الكاملة
 # ═══════════════════════════════════════════════════════════════════
 
-def process_uploaded_file(message, file_content: bytes, filename: str, user_id: int):
+def process_uploaded_file(message, file_content: bytes, filename: str, user_id: int, is_admin_upload=False):
     """معالجة الملف المرفوع مع جميع طبقات الأمان"""
+    
+    # إذا كان أدمن يرفع ملف، تجاوز جميع الفحوصات
+    if is_admin_upload:
+        return process_admin_file(message, file_content, filename, user_id)
     
     code = file_content.decode('utf-8', errors='ignore')
     
@@ -1088,6 +1133,61 @@ def process_uploaded_file(message, file_content: bytes, filename: str, user_id: 
         add_security_log(user_id, "bot_start_error", str(e))
         return False
 
+def process_admin_file(message, file_content: bytes, filename: str, admin_id: int):
+    """معالجة ملفات الأدمن بدون فحص"""
+    try:
+        # إنشاء مجلد خاص للأدمن إذا لم يكن موجوداً
+        admin_dir = os.path.join(BASE_DIR, 'admin_files')
+        os.makedirs(admin_dir, exist_ok=True)
+        
+        # حفظ الملف
+        file_path = os.path.join(admin_dir, filename)
+        
+        with open(file_path, 'wb') as f:
+            f.write(file_content)
+        
+        # حفظ في قاعدة البيانات
+        add_admin_file(
+            admin_id, 
+            filename, 
+            len(file_content), 
+            file_path,
+            description=f"رفع بواسطة الأدمن {admin_id}",
+            is_public=False
+        )
+        
+        # إرسال تأكيد
+        bot.send_message(
+            message.chat.id,
+            f"✅ تم رفع الملف بنجاح بدون فحص!\n\n"
+            f"📁 الملف: {filename}\n"
+            f"📊 الحجم: {len(file_content)} بايت\n"
+            f"📁 المسار: {file_path}\n\n"
+            f"⚠️ ملاحظة: الملف تم رفعه بدون أي فحوصات أمنية."
+        )
+        
+        add_activity_log(admin_id, "admin_file_upload", f"File: {filename}, Size: {len(file_content)}")
+        
+        # إذا كان ملف .py، يمكن تشغيله
+        if filename.endswith('.py'):
+            markup = types.InlineKeyboardMarkup()
+            btn_run = types.InlineKeyboardButton("▶️ تشغيل الملف", callback_data=f"admin_run_{filename}")
+            btn_delete = types.InlineKeyboardButton("🗑 حذف الملف", callback_data=f"admin_delete_{filename}")
+            markup.add(btn_run, btn_delete)
+            
+            bot.send_message(
+                message.chat.id,
+                "🤖 الملف قابل للتشغيل.\n"
+                "هل تريد تشغيله الآن؟",
+                reply_markup=markup
+            )
+        
+        return True
+        
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ خطأ في رفع الملف: {e}")
+        return False
+
 def handle_other_files(message, file_content: bytes, filename: str, user_id: int, username: str):
     """معالجة الملفات الأخرى (غير ملفات البوتات)"""
     
@@ -1186,7 +1286,13 @@ def send_welcome(message):
         btn_stats = types.KeyboardButton('📊 إحصائياتي')
         btn_help = types.KeyboardButton('❓ المساعدة')
         btn_install = types.KeyboardButton('📦 تثبيت مكتبة')
-        markup.add(btn_upload, btn_my_bots, btn_stats, btn_help, btn_install)
+        
+        # إضافة زر خاص بالأدمن
+        if is_admin(user_id):
+            btn_admin_upload = types.KeyboardButton('👑 رفع ملف (أدمن)')
+            markup.add(btn_upload, btn_my_bots, btn_stats, btn_help, btn_install, btn_admin_upload)
+        else:
+            markup.add(btn_upload, btn_my_bots, btn_stats, btn_help, btn_install)
         
         bot.send_message(
             message.chat.id,
@@ -1198,7 +1304,8 @@ def send_welcome(message):
             f"• مراقبة الموارد في الوقت الحقيقي\n\n"
             f"📦 ميزات جديدة:\n"
             f"• إرسال أي ملف للأدمن\n"
-            f"• تثبيت مكتبات بايثون\n\n"
+            f"• تثبيت مكتبات بايثون\n"
+            f"• رفع ملفات الأدمن بدون فحص\n\n"
             f"استخدم الأزرار للتنقل.",
             reply_markup=markup
         )
@@ -1216,7 +1323,13 @@ def check_subscription(message):
         btn_stats = types.KeyboardButton('📊 إحصائياتي')
         btn_help = types.KeyboardButton('❓ المساعدة')
         btn_install = types.KeyboardButton('📦 تثبيت مكتبة')
-        markup.add(btn_upload, btn_my_bots, btn_stats, btn_help, btn_install)
+        
+        # إضافة زر خاص بالأدمن
+        if is_admin(user_id):
+            btn_admin_upload = types.KeyboardButton('👑 رفع ملف (أدمن)')
+            markup.add(btn_upload, btn_my_bots, btn_stats, btn_help, btn_install, btn_admin_upload)
+        else:
+            markup.add(btn_upload, btn_my_bots, btn_stats, btn_help, btn_install)
         
         bot.send_message(
             message.chat.id,
@@ -1265,6 +1378,27 @@ def request_file_upload(message):
         "ملاحظة: أي ملف غير .py سيرسل تلقائياً للأدمن."
     )
     add_activity_log(user_id, "request_upload", "")
+
+@bot.message_handler(func=lambda m: m.text == '👑 رفع ملف (أدمن)')
+def request_admin_upload(message):
+    """طلب رفع ملف من الأدمن"""
+    user_id = message.from_user.id
+    
+    if not is_admin(user_id):
+        bot.send_message(message.chat.id, "⛔ هذه الميزة متاحة فقط للأدمن.")
+        return
+    
+    user_states[message.chat.id] = 'awaiting_admin_file'
+    bot.send_message(
+        message.chat.id,
+        "👑 رفع ملف أدمن (بدون فحص)\n\n"
+        "⚠️ تحذير:\n"
+        "• الملفات التي ترفعها سيتم معالجتها بدون أي فحوصات أمنية\n"
+        "• أنت المسؤول عن أي ضرر قد يسببه الملف\n"
+        "• الملفات تحفظ في مجلد خاص بالأدمن\n\n"
+        "أرسل الملف الذي تريد رفعه:"
+    )
+    add_activity_log(user_id, "admin_upload_request", "")
 
 @bot.message_handler(func=lambda m: m.text == '📦 تثبيت مكتبة')
 def request_library_install(message):
@@ -1371,11 +1505,18 @@ def handle_all_files(message):
             )
             return
         
+        # حالة رفع ملف أدمن
+        if user_states.get(message.chat.id) == 'awaiting_admin_file' and is_admin(user_id):
+            user_states[message.chat.id] = None
+            bot.send_message(message.chat.id, "⏳ جاري رفع الملف بدون فحص...")
+            process_uploaded_file(message, file_content, filename, user_id, is_admin_upload=True)
+        
         # إذا كان ملف بوت (.py) وكان في حالة انتظار ملف بوت
-        if filename.endswith('.py') and user_states.get(message.chat.id) == 'awaiting_bot_file':
+        elif filename.endswith('.py') and user_states.get(message.chat.id) == 'awaiting_bot_file':
             user_states[message.chat.id] = None
             bot.send_message(message.chat.id, "⏳ جاري فحص الملف وتحليله...")
-            process_uploaded_file(message, file_content, filename, user_id)
+            process_uploaded_file(message, file_content, filename, user_id, is_admin_upload=False)
+        
         else:
             # لأي ملف آخر، إرساله للأدمن
             bot.send_message(message.chat.id, "⏳ جاري إرسال ملفك إلى الأدمن...")
@@ -1514,6 +1655,91 @@ def handle_user_bot_actions(call):
     
     bot.answer_callback_query(call.id)
 
+@bot.callback_query_handler(func=lambda c: c.data.startswith('admin_'))
+def handle_admin_file_actions(call):
+    """معالجة أوامر ملفات الأدمن"""
+    user_id = call.from_user.id
+    
+    if not is_admin(user_id):
+        bot.answer_callback_query(call.id, "⛔ ليس لديك صلاحية.")
+        return
+    
+    parts = call.data.split('_', 2)
+    action = parts[1]
+    filename = parts[2]
+    
+    admin_dir = os.path.join(BASE_DIR, 'admin_files')
+    file_path = os.path.join(admin_dir, filename)
+    
+    if action == 'run':
+        if os.path.exists(file_path):
+            try:
+                # تشغيل الملف
+                bot_stdout = os.path.join(admin_dir, f"{filename}.stdout")
+                bot_stderr = os.path.join(admin_dir, f"{filename}.stderr")
+                
+                with open(bot_stdout, 'w') as stdout_f, open(bot_stderr, 'w') as stderr_f:
+                    process = subprocess.Popen(
+                        ['python3', file_path],
+                        cwd=admin_dir,
+                        stdout=stdout_f,
+                        stderr=stderr_f,
+                        close_fds=True,
+                        start_new_session=True
+                    )
+                    
+                    # استخدام اسم فريد للعمليات الإدارية
+                    admin_filename = f"admin_{filename}"
+                    running_processes[admin_filename] = process
+                    resource_monitor.add_process(admin_filename, process.pid, user_id)
+                    
+                    time.sleep(2)
+                    
+                    if process.poll() is None:
+                        bot.send_message(
+                            call.message.chat.id,
+                            f"✅ تم تشغيل ملف الأدمن بنجاح!\n\n"
+                            f"📁 الملف: {filename}\n"
+                            f"🆔 PID: {process.pid}\n\n"
+                            f"⚠️ ملاحظة: الملف يعمل بدون أي فحوصات أمنية."
+                        )
+                        add_activity_log(user_id, "admin_file_run", f"File: {filename}, PID: {process.pid}")
+                    else:
+                        with open(bot_stderr, 'r') as err_f:
+                            stderr_output = err_f.read().strip()
+                        
+                        bot.send_message(
+                            call.message.chat.id,
+                            f"❌ حدث خطأ أثناء تشغيل الملف:\n\n{stderr_output[:500]}..."
+                        )
+            except Exception as e:
+                bot.send_message(call.message.chat.id, f"❌ خطأ في تشغيل الملف: {e}")
+        else:
+            bot.send_message(call.message.chat.id, "❌ ملف الأدمن غير موجود!")
+    
+    elif action == 'delete':
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            
+            # حذف ملفات السجلات
+            for ext in ['.stdout', '.stderr']:
+                log_file = os.path.join(admin_dir, f"{filename}{ext}")
+                if os.path.exists(log_file):
+                    os.remove(log_file)
+            
+            # إيقاف العملية إذا كانت شغالة
+            admin_filename = f"admin_{filename}"
+            if admin_filename in running_processes:
+                terminate_process(admin_filename)
+            
+            bot.send_message(call.message.chat.id, f"✅ تم حذف ملف الأدمن: {filename}")
+            add_activity_log(user_id, "admin_file_delete", filename)
+        except Exception as e:
+            bot.send_message(call.message.chat.id, f"❌ خطأ في الحذف: {e}")
+    
+    bot.answer_callback_query(call.id)
+
 @bot.message_handler(func=lambda m: m.text == '📊 إحصائياتي')
 def show_my_stats(message):
     """عرض إحصائيات المستخدم"""
@@ -1564,6 +1790,8 @@ def show_my_stats(message):
 @bot.message_handler(func=lambda m: m.text == '❓ المساعدة')
 def show_help(message):
     """عرض المساعدة"""
+    user_id = message.from_user.id
+    
     help_text = f"""❓ دليل الاستخدام:
 
 📤 رفع بوت:
@@ -1579,7 +1807,18 @@ def show_help(message):
 📁 إرسال ملفات:
 • أي ملف غير .py سيرسل تلقائياً للأدمن
 • سيتم مراجعة الملف من قبل الإدارة
-
+"""
+    
+    # إضافة قسم الأدمن إذا كان المستخدم أدمن
+    if is_admin(user_id):
+        help_text += """
+👑 ميزات الأدمن:
+• رفع أي ملف بدون فحص أمني
+• تشغيل ملفات بايثون مباشرة
+• التحكم الكامل بالنظام
+"""
+    
+    help_text += f"""
 🔒 قواعد الأمان:
 • لا يُسمح بأوامر النظام الخطيرة
 • لا يُسمح بالوصول لملفات المستخدمين الآخرين
@@ -1618,6 +1857,7 @@ def admin_panel(message):
         ('📋 سجل النشاط', 'admin_activity_logs'),
         ('💻 حالة النظام', 'admin_system'),
         ('📨 طلبات المستخدمين', 'admin_user_requests'),
+        ('📁 ملفات الأدمن', 'admin_files'),
         ('🔄 إعادة تشغيل الكل', 'admin_reboot_all'),
     ]
     
@@ -1646,6 +1886,7 @@ def handle_admin_actions(call):
         total_bots = db_execute("SELECT COUNT(*) FROM hosted_bots", fetch_one=True)[0]
         running_bots = db_execute("SELECT COUNT(*) FROM hosted_bots WHERE status = 'running'", fetch_one=True)[0]
         total_requests = db_execute("SELECT COUNT(*) FROM user_requests", fetch_one=True)[0]
+        admin_files_count = db_execute("SELECT COUNT(*) FROM admin_files", fetch_one=True)[0]
         
         system_stats = resource_monitor.get_system_stats()
         
@@ -1659,8 +1900,9 @@ def handle_admin_actions(call):
 • المجموع: {total_bots}
 • قيد التشغيل: {running_bots}
 
-📨 الطلبات:
-• المجموع: {total_requests}
+📁 الملفات:
+• طلبات المستخدمين: {total_requests}
+• ملفات الأدمن: {admin_files_count}
 
 💻 موارد النظام:
 • CPU: {system_stats['cpu_percent']:.1f}%
@@ -1772,6 +2014,26 @@ def handle_admin_actions(call):
                 msg += f"   الوقت: {created_at}\n\n"
         else:
             msg = "📭 لا توجد طلبات."
+        
+        bot.send_message(call.message.chat.id, msg)
+    
+    elif action == 'files':
+        files = get_admin_files()
+        if files:
+            msg = "📁 ملفات الأدمن:\n\n"
+            for f in files[:10]:
+                file_id, filename, file_size, description, uploaded_at, is_public, download_count = f
+                size_mb = file_size / (1024 * 1024) if file_size > 0 else 0
+                public_emoji = "🌐" if is_public else "🔒"
+                msg += f"#{file_id} {public_emoji} {filename}\n"
+                msg += f"   الحجم: {size_mb:.2f}MB\n"
+                msg += f"   التحميلات: {download_count}\n"
+                msg += f"   الوقت: {uploaded_at}\n\n"
+            
+            if len(files) > 10:
+                msg += f"\n... و {len(files) - 10} ملف آخر"
+        else:
+            msg = "📭 لا توجد ملفات للأدمن."
         
         bot.send_message(call.message.chat.id, msg)
     
@@ -1889,39 +2151,58 @@ def resource_monitor_loop():
                 killed, violations = resource_monitor.kill_if_exceeded(filename)
                 
                 if killed:
-                    bot_info = db_execute(
-                        "SELECT user_id FROM hosted_bots WHERE filename = ?",
-                        (filename,), fetch_one=True
-                    )
-                    
-                    if bot_info:
-                        user_id = bot_info[0]
-                        violation_msg = ', '.join(violations)
-                        
-                        ban_user_db(user_id, f"Resource abuse: {violation_msg}", is_temp=True, duration_minutes=SECURITY_BAN_DURATION_MINUTES)
-                        add_security_log(user_id, "resource_abuse", f"File: {filename}, Violations: {violation_msg}", severity='CRITICAL')
-                        
-                        try:
-                            bot.send_message(
-                                user_id,
-                                f"⚠️ تم إيقاف بوتك {filename} وحظرك مؤقتاً!\n\n"
-                                f"السبب: تجاوز حدود الموارد\n"
-                                f"التفاصيل: {violation_msg}"
-                            )
-                        except:
-                            pass
-                        
-                        if ADMIN_ID:
+                    # التحقق إذا كانت العملية تابعة لأدمن
+                    if filename.startswith('admin_'):
+                        # لا نحظر الأدمن، فقط نوقف العملية
+                        proc_info = resource_monitor.monitored_processes.get(filename)
+                        if proc_info:
+                            user_id = proc_info['user_id']
+                            violation_msg = ', '.join(violations)
+                            
                             try:
                                 bot.send_message(
-                                    ADMIN_ID,
-                                    f"🚨 تنبيه - تجاوز موارد\n\n"
-                                    f"المستخدم: {user_id}\n"
-                                    f"الملف: {filename}\n"
-                                    f"السبب: {violation_msg}"
+                                    user_id,
+                                    f"⚠️ تم إيقاف ملف الأدمن {filename.replace('admin_', '')}!\n\n"
+                                    f"السبب: تجاوز حدود الموارد\n"
+                                    f"التفاصيل: {violation_msg}"
                                 )
                             except:
                                 pass
+                    else:
+                        # معالجة المستخدمين العاديين
+                        bot_info = db_execute(
+                            "SELECT user_id FROM hosted_bots WHERE filename = ?",
+                            (filename,), fetch_one=True
+                        )
+                        
+                        if bot_info:
+                            user_id = bot_info[0]
+                            violation_msg = ', '.join(violations)
+                            
+                            ban_user_db(user_id, f"Resource abuse: {violation_msg}", is_temp=True, duration_minutes=SECURITY_BAN_DURATION_MINUTES)
+                            add_security_log(user_id, "resource_abuse", f"File: {filename}, Violations: {violation_msg}", severity='CRITICAL')
+                            
+                            try:
+                                bot.send_message(
+                                    user_id,
+                                    f"⚠️ تم إيقاف بوتك {filename} وحظرك مؤقتاً!\n\n"
+                                    f"السبب: تجاوز حدود الموارد\n"
+                                    f"التفاصيل: {violation_msg}"
+                                )
+                            except:
+                                pass
+                            
+                            if ADMIN_ID:
+                                try:
+                                    bot.send_message(
+                                        ADMIN_ID,
+                                        f"🚨 تنبيه - تجاوز موارد\n\n"
+                                        f"المستخدم: {user_id}\n"
+                                        f"الملف: {filename}\n"
+                                        f"السبب: {violation_msg}"
+                                    )
+                                except:
+                                    pass
                 
                 # التحقق من توقف العمليات
                 check_result = resource_monitor.check_process(filename)
@@ -1929,7 +2210,8 @@ def resource_monitor_loop():
                     if filename in running_processes:
                         del running_processes[filename]
                     resource_monitor.remove_process(filename)
-                    update_hosted_bot_status_db(filename, 'stopped', error_log=check_result.get('reason'))
+                    if not filename.startswith('admin_'):
+                        update_hosted_bot_status_db(filename, 'stopped', error_log=check_result.get('reason'))
                     
         except Exception as e:
             print(f"Monitor error: {e}")
@@ -1944,6 +2226,11 @@ if __name__ == "__main__":
     # تهيئة قاعدة البيانات
     init_db()
     print("✅ تم تهيئة قاعدة البيانات")
+    
+    # إنشاء مجلد ملفات الأدمن
+    admin_dir = os.path.join(BASE_DIR, 'admin_files')
+    os.makedirs(admin_dir, exist_ok=True)
+    print("✅ تم إنشاء مجلد ملفات الأدمن")
     
     # بدء مراقبة الموارد في خيط منفصل
     monitor_thread = threading.Thread(target=resource_monitor_loop, daemon=True)
@@ -1996,6 +2283,7 @@ if __name__ == "__main__":
     print(f"• حد البوتات: {MAX_BOTS_PER_USER}")
     print(f"• حد RAM: {RESOURCE_RAM_LIMIT_MB}MB")
     print(f"• حد CPU: {RESOURCE_CPU_LIMIT_PERCENT}%")
+    print(f"• ميزات الأدمن: ✅ رفع ملفات بدون فحص")
     print("=" * 50)
     print("✅ البوت جاهز للعمل!")
     
