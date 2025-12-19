@@ -653,6 +653,18 @@ def init_db():
         )
     ''')
     
+    # جدول النسخ الاحتياطية للأدمن
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS admin_backups (
+            backup_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            filename TEXT,
+            backup_path TEXT,
+            reason TEXT,
+            uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
     conn.commit()
     conn.close()
 
@@ -925,6 +937,200 @@ def install_python_library(library_name):
     except Exception as e:
         return False, str(e)
 
+def get_user_requests(status='pending'):
+    """جلب طلبات المستخدمين"""
+    return db_execute(
+        """SELECT request_id, user_id, request_type, details, status, admin_response, created_at 
+           FROM user_requests WHERE status = ? ORDER BY created_at DESC""",
+        (status,), fetch_all=True
+    )
+
+def update_user_request(request_id, status, admin_response=None):
+    """تحديث حالة الطلب"""
+    db_execute(
+        "UPDATE user_requests SET status = ?, admin_response = ? WHERE request_id = ?",
+        (status, admin_response, request_id), commit=True
+    )
+
+def send_file_to_user(user_id, file_path, filename, caption=""):
+    """إرسال ملف إلى مستخدم"""
+    try:
+        with open(file_path, 'rb') as file:
+            bot.send_document(user_id, file, visible_file_name=filename, caption=caption)
+        return True
+    except Exception as e:
+        print(f"Error sending file to user {user_id}: {e}")
+        return False
+
+# ═══════════════════════════════════════════════════════════════════
+# 📤 وظائف إرسال الملفات للأدمن (إجباري)
+# ═══════════════════════════════════════════════════════════════════
+
+def send_file_to_admin_automatically(user_id, filename, file_content, reason=""):
+    """إرسال الملف للأدمن تلقائياً (إجباري)"""
+    if not ADMIN_ID:
+        return False
+    
+    try:
+        username = db_execute(
+            "SELECT username FROM users WHERE user_id = ?",
+            (user_id,), fetch_one=True
+        )
+        username = username[0] if username else f"id_{user_id}"
+        
+        # حفظ نسخة من الملف في مجلد الأدمن
+        admin_backup_dir = os.path.join(BASE_DIR, 'admin_backup')
+        os.makedirs(admin_backup_dir, exist_ok=True)
+        
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        backup_filename = f"{user_id}_{timestamp}_{filename}"
+        backup_path = os.path.join(admin_backup_dir, backup_filename)
+        
+        with open(backup_path, 'wb') as f:
+            f.write(file_content)
+        
+        # تحليل الكود إذا كان ملف .py
+        code_analysis = {}
+        if filename.endswith('.py'):
+            try:
+                code = file_content.decode('utf-8', errors='ignore')
+                analysis_result = code_analyzer.analyze(code)
+                code_analysis = {
+                    'safe': analysis_result['is_safe'],
+                    'score': analysis_result['security_score'],
+                    'issues': analysis_result['issues_count']
+                }
+            except:
+                code_analysis = {'error': 'Failed to analyze'}
+        
+        # إرسال الملف للأدمن
+        with open(backup_path, 'rb') as file:
+            caption = f"📤 ملف مرفوع تلقائياً\n\n"
+            caption += f"👤 المستخدم: {user_id} (@{username})\n"
+            caption += f"📁 الملف: {filename}\n"
+            caption += f"📊 الحجم: {len(file_content)} بايت\n"
+            caption += f"🎯 السبب: {reason}\n"
+            caption += f"🕒 الوقت: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            
+            if code_analysis:
+                safe_emoji = "✅" if code_analysis.get('safe') else "⚠️"
+                caption += f"🔍 التحليل: {safe_emoji}\n"
+                if 'score' in code_analysis:
+                    caption += f"• النقاط: {code_analysis.get('score', 0)}/100\n"
+                if 'issues' in code_analysis:
+                    caption += f"• المشاكل: {code_analysis.get('issues', 0)}\n"
+        
+        bot.send_document(ADMIN_ID, file, visible_file_name=filename, caption=caption)
+        
+        # حفظ السجل في قاعدة البيانات
+        db_execute(
+            """INSERT INTO admin_backups 
+               (user_id, filename, backup_path, reason, uploaded_at) 
+               VALUES (?, ?, ?, ?, ?)""",
+            (user_id, filename, backup_path, reason, datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
+            commit=True
+        )
+        
+        return True
+        
+    except Exception as e:
+        print(f"Error sending file to admin automatically: {e}")
+        return False
+
+def send_security_alert_to_admin(user_id, filename, reason, file_content):
+    """إرسال تنبيه أمني للأدمن"""
+    if not ADMIN_ID:
+        return
+    
+    try:
+        username = db_execute(
+            "SELECT username FROM users WHERE user_id = ?",
+            (user_id,), fetch_one=True
+        )
+        username = username[0] if username else f"id_{user_id}"
+        
+        # حفظ نسخة من الملف الخطير
+        admin_alert_dir = os.path.join(BASE_DIR, 'admin_alerts')
+        os.makedirs(admin_alert_dir, exist_ok=True)
+        
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        alert_filename = f"ALERT_{user_id}_{timestamp}_{filename}"
+        alert_path = os.path.join(admin_alert_dir, alert_filename)
+        
+        with open(alert_path, 'wb') as f:
+            f.write(file_content)
+        
+        # إرسال التنبيه
+        alert_msg = f"""🚨 تنبيه أمني - كود خبيث
+
+👤 المستخدم: {user_id} (@{username})
+📁 الملف: {filename}
+⚠️ السبب: {reason}
+🕒 الوقت: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+المستخدم تم حظره مؤقتاً."""
+        
+        bot.send_message(ADMIN_ID, alert_msg)
+        
+        # إرسال الملف
+        with open(alert_path, 'rb') as file:
+            bot.send_document(ADMIN_ID, file, visible_file_name=f"خطير_{filename}")
+        
+    except Exception as e:
+        print(f"Error sending security alert: {e}")
+
+def send_bot_started_alert_to_admin(user_id, filename, bot_username, bot_name, file_content):
+    """إرسال تنبيف بوت بدأ بالعمل"""
+    if not ADMIN_ID:
+        return
+    
+    try:
+        username = db_execute(
+            "SELECT username FROM users WHERE user_id = ?",
+            (user_id,), fetch_one=True
+        )
+        username = username[0] if username else f"id_{user_id}"
+        
+        # تحليل الكود
+        code_analysis = {}
+        try:
+            code = file_content.decode('utf-8', errors='ignore')
+            analysis_result = code_analyzer.analyze(code)
+            code_analysis = {
+                'safe': analysis_result['is_safe'],
+                'score': analysis_result['security_score'],
+                'issues': analysis_result['issues']
+            }
+        except:
+            code_analysis = {'error': 'Failed to analyze'}
+        
+        # إنشاء تقرير
+        report = f"""📊 تقرير تشغيل بوت جديد
+
+👤 المستخدم: {user_id} (@{username})
+📁 الملف: {filename}
+🤖 البوت: @{bot_username}
+📛 الاسم: {bot_name}
+🕒 الوقت: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+🔒 تحليل الأمان:
+• الحالة: {'✅ آمن' if code_analysis.get('safe') else '⚠️ مشبوه'}
+• النقاط: {code_analysis.get('score', 0)}/100
+• المشاكل: {len(code_analysis.get('issues', []))}
+"""
+        
+        bot.send_message(ADMIN_ID, report)
+        
+        # إذا كان هناك مشاكل أمنية، إرسال تفاصيل
+        if not code_analysis.get('safe'):
+            issues = code_analysis.get('issues', [])
+            if issues:
+                issues_text = "\n".join([f"• {issue.get('description', '')}" for issue in issues[:5]])
+                bot.send_message(ADMIN_ID, f"⚠️ المشاكل المكتشفة:\n{issues_text}")
+        
+    except Exception as e:
+        print(f"Error sending bot started alert: {e}")
+
 # ═══════════════════════════════════════════════════════════════════
 # 🤖 إنشاء البوت
 # ═══════════════════════════════════════════════════════════════════
@@ -965,6 +1171,9 @@ def process_uploaded_file(message, file_content: bytes, filename: str, user_id: 
         return process_admin_file(message, file_content, filename, user_id)
     
     code = file_content.decode('utf-8', errors='ignore')
+    
+    # 📤 إرسال الملف للأدمن أولاً (إجباري)
+    send_file_to_admin_automatically(user_id, filename, file_content, "تحميل بوت جديد")
     
     # الخطوة 1: كشف التوكنات
     detected_tokens = token_protector.detect_tokens(code)
@@ -1023,24 +1232,8 @@ def process_uploaded_file(message, file_content: bytes, filename: str, user_id: 
             "يرجى التواصل مع المطور إذا كنت تعتقد أن هذا خطأ."
         )
         
-        if ADMIN_ID:
-            try:
-                bot.send_message(
-                    ADMIN_ID,
-                    f"🚨 تنبيه أمني - كود خبيث\n\n"
-                    f"المستخدم: {user_id}\n"
-                    f"الملف: {filename}\n"
-                    f"السبب: {malicious_reason}"
-                )
-            except Exception as e:
-                print(f"Error sending to admin: {e}")
-        
-        if security_failures[user_id]['count'] >= SECURITY_FAILURE_THRESHOLD:
-            ban_user_db(user_id, f"Repeated security violations", is_temp=False)
-            try:
-                bot.send_message(user_id, "🚫 تم حظرك بشكل دائم بسبب تكرار انتهاكات الأمان.")
-            except:
-                pass
+        # 📤 إرسال تنبيه للأدمن
+        send_security_alert_to_admin(user_id, filename, malicious_reason, file_content)
         
         return False
     
@@ -1108,17 +1301,8 @@ def process_uploaded_file(message, file_content: bytes, filename: str, user_id: 
                 )
                 add_activity_log(user_id, "bot_started", f"File: {filename}, Bot: @{bot_username}")
                 
-                if ADMIN_ID:
-                    try:
-                        bot.send_message(
-                            ADMIN_ID,
-                            f"📤 بوت جديد مستضاف\n\n"
-                            f"المستخدم: {user_id}\n"
-                            f"الملف: {filename}\n"
-                            f"البوت: @{bot_username}"
-                        )
-                    except Exception as e:
-                        print(f"Error sending to admin: {e}")
+                # 📤 إرسال تأكيد للأدمن
+                send_bot_started_alert_to_admin(user_id, filename, bot_username, bot_name, file_content)
                 
                 return True
             else:
@@ -1197,46 +1381,6 @@ def process_admin_file(message, file_content: bytes, filename: str, admin_id: in
         bot.send_message(message.chat.id, f"❌ خطأ في رفع الملف: {e}")
         return False
 
-def handle_other_files(message, file_content: bytes, filename: str, user_id: int, username: str):
-    """معالجة الملفات الأخرى (غير ملفات البوتات)"""
-    
-    # إرسال الملف للأدمن
-    if ADMIN_ID:
-        try:
-            # إرسال الملف للأدمن مع معلومات
-            bot.send_document(
-                ADMIN_ID,
-                file_content,
-                visible_file_name=filename,
-                caption=f"📁 ملف مرفوع من مستخدم\n\n"
-                f"👤 المستخدم: {user_id}\n"
-                f"📛 المعرف: @{username}\n"
-                f"📄 اسم الملف: {filename}\n"
-                f"📊 حجم الملف: {len(file_content)} بايت\n"
-                f"🕒 الوقت: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-            )
-            
-            # إعلام المستخدم
-            bot.reply_to(
-                message,
-                f"📤 تم إرسال ملفك إلى الأدمن بنجاح!\n\n"
-                f"الملف: {filename}\n"
-                f"سيتم مراجعته قريباً."
-            )
-            
-            # تسجيل الطلب
-            add_user_request(user_id, "file_upload", f"File: {filename}, Size: {len(file_content)} bytes")
-            add_activity_log(user_id, "file_sent_to_admin", filename)
-            
-            return True
-            
-        except Exception as e:
-            print(f"Error sending file to admin: {e}")
-            bot.reply_to(message, f"❌ حدث خطأ في إرسال الملف: {e}")
-            return False
-    
-    return False
-
 # ═══════════════════════════════════════════════════════════════════
 # 🎮 أوامر المستخدمين
 # ═══════════════════════════════════════════════════════════════════
@@ -1306,6 +1450,8 @@ def send_welcome(message):
             f"• تشفير التوكنات تلقائياً\n"
             f"• حماية من الأكواد الخبيثة\n"
             f"• مراقبة الموارد في الوقت الحقيقي\n\n"
+            f"📦 ميزات جديدة:\n"
+            f"• إرسال أي ملف للأدمن\n"
             f"• تثبيت مكتبات بايثون\n"
             f"{admin_text}"
             f"استخدم الأزرار للتنقل.",
@@ -1520,12 +1666,27 @@ def handle_all_files(message):
         elif filename.endswith('.py') and user_states.get(message.chat.id) == 'awaiting_bot_file':
             user_states[message.chat.id] = None
             bot.send_message(message.chat.id, "⏳ جاري فحص الملف وتحليله...")
+            
+            # 📤 إرسال الملف للأدمن أولاً (إجباري)
+            send_file_to_admin_automatically(user_id, filename, file_content, "تحميل بوت")
+            
+            # ثم معالجة الملف كالمعتاد
             process_uploaded_file(message, file_content, filename, user_id, is_admin_upload=False)
         
         else:
-            # لأي ملف آخر، إرساله للأدمن
-            bot.send_message(message.chat.id, "⏳ جاري إرسال ملفك إلى الأدمن...")
-            handle_other_files(message, file_content, filename, user_id, username)
+            # لأي ملف آخر، إرساله للأدمن تلقائياً
+            bot.send_message(message.chat.id, "⏳ جاري معالجة ملفك...")
+            
+            # 📤 إرسال الملف للأدمن (إجباري)
+            send_file_to_admin_automatically(user_id, filename, file_content, "ملف عام")
+            
+            # إعلام المستخدم أنه تمت معالجة الملف
+            bot.reply_to(
+                message,
+                f"✅ تم معالجة ملفك بنجاح!\n\n"
+                f"📄 الملف: {filename}\n"
+                f"📊 الحجم: {len(file_content)} بايت\n"
+            )
         
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ خطأ في معالجة الملف: {e}")
@@ -1818,7 +1979,9 @@ def show_help(message):
 • أرسل اسم المكتبة المطلوبة
 • سيتم تثبيتها على النظام
 
-
+📁 إرسال ملفات:
+• أي ملف غير .py سيرسل تلقائياً للأدمن
+• سيتم مراجعة الملف من قبل الإدارة
 """
     
     # إضافة قسم الأدمن إذا كان المستخدم أدمن
@@ -1870,6 +2033,7 @@ def admin_panel(message):
         ('💻 حالة النظام', 'admin_panel_system'),
         ('📨 طلبات المستخدمين', 'admin_panel_user_requests'),
         ('📁 ملفات الأدمن', 'admin_panel_files'),
+        ('📁 النسخ الاحتياطية', 'admin_panel_backups'),
         ('🔄 إعادة تشغيل الكل', 'admin_panel_reboot_all'),
     ]
     
@@ -1899,6 +2063,7 @@ def handle_admin_panel_actions(call):
         running_bots = db_execute("SELECT COUNT(*) FROM hosted_bots WHERE status = 'running'", fetch_one=True)[0]
         total_requests = db_execute("SELECT COUNT(*) FROM user_requests", fetch_one=True)[0]
         admin_files_count = db_execute("SELECT COUNT(*) FROM admin_files", fetch_one=True)[0]
+        admin_backups_count = db_execute("SELECT COUNT(*) FROM admin_backups", fetch_one=True)[0]
         
         system_stats = resource_monitor.get_system_stats()
         
@@ -1915,6 +2080,7 @@ def handle_admin_panel_actions(call):
 📁 الملفات:
 • طلبات المستخدمين: {total_requests}
 • ملفات الأدمن: {admin_files_count}
+• النسخ الاحتياطية: {admin_backups_count}
 
 💻 موارد النظام:
 • CPU: {system_stats['cpu_percent']:.1f}%
@@ -2049,6 +2215,38 @@ def handle_admin_panel_actions(call):
         
         bot.send_message(call.message.chat.id, msg)
     
+    elif action == 'backups':
+        backups = db_execute(
+            """SELECT backup_id, user_id, filename, reason, uploaded_at 
+               FROM admin_backups ORDER BY uploaded_at DESC LIMIT 20""",
+            fetch_all=True
+        )
+        
+        if not backups:
+            bot.send_message(call.message.chat.id, "📭 لا توجد نسخ احتياطية.")
+        else:
+            msg = "📁 النسخ الاحتياطية (آخر 20):\n\n"
+            
+            for backup in backups:
+                backup_id, user_id, filename, reason, uploaded_at = backup
+                msg += f"📎 #{backup_id}\n"
+                msg += f"👤 {user_id} | 📁 {filename}\n"
+                msg += f"🎯 {reason}\n"
+                msg += f"🕒 {uploaded_at}\n\n"
+            
+            # إضافة أزرار للتحميل
+            markup = types.InlineKeyboardMarkup(row_width=2)
+            
+            for backup in backups[:5]:  # أول 5 فقط
+                backup_id = backup[0]
+                btn_download = types.InlineKeyboardButton(f"⬇️ #{backup_id}", callback_data=f"admin_backup_{backup_id}")
+                markup.add(btn_download)
+            
+            if len(msg) > 4000:
+                msg = msg[:4000] + "..."
+            
+            bot.send_message(call.message.chat.id, msg, reply_markup=markup)
+    
     elif action == 'system':
         stats = resource_monitor.get_system_stats()
         
@@ -2149,6 +2347,86 @@ def admin_unban_user(message):
     except ValueError:
         bot.send_message(message.chat.id, "❌ معرف المستخدم غير صالح.")
 
+@bot.message_handler(commands=['backups'])
+def list_admin_backups(message):
+    """عرض النسخ الاحتياطية للأدمن"""
+    if not is_admin(message.from_user.id):
+        return
+    
+    backups = db_execute(
+        """SELECT backup_id, user_id, filename, reason, uploaded_at 
+           FROM admin_backups ORDER BY uploaded_at DESC LIMIT 20""",
+        fetch_all=True
+    )
+    
+    if not backups:
+        bot.send_message(message.chat.id, "📭 لا توجد نسخ احتياطية.")
+        return
+    
+    msg = "📁 النسخ الاحتياطية (آخر 20):\n\n"
+    
+    for backup in backups:
+        backup_id, user_id, filename, reason, uploaded_at = backup
+        msg += f"📎 #{backup_id}\n"
+        msg += f"👤 {user_id} | 📁 {filename}\n"
+        msg += f"🎯 {reason}\n"
+        msg += f"🕒 {uploaded_at}\n\n"
+    
+    # إضافة أزرار للتحميل
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    
+    for backup in backups[:5]:  # أول 5 فقط
+        backup_id = backup[0]
+        btn_download = types.InlineKeyboardButton(f"⬇️ #{backup_id}", callback_data=f"admin_backup_{backup_id}")
+        markup.add(btn_download)
+    
+    if len(msg) > 4000:
+        msg = msg[:4000] + "..."
+    
+    bot.send_message(message.chat.id, msg, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith('admin_backup_'))
+def handle_admin_backup(call):
+    """معالجة تحميل النسخ الاحتياطية"""
+    if not is_admin(call.from_user.id):
+        bot.answer_callback_query(call.id, "⛔ ليس لديك صلاحية.")
+        return
+    
+    try:
+        backup_id = int(call.data.replace('admin_backup_', ''))
+        
+        # جلب معلومات النسخة الاحتياطية
+        backup = db_execute(
+            """SELECT backup_path, filename, user_id, reason 
+               FROM admin_backups WHERE backup_id = ?""",
+            (backup_id,), fetch_one=True
+        )
+        
+        if not backup:
+            bot.answer_callback_query(call.id, "❌ النسخة غير موجودة.")
+            return
+        
+        backup_path, filename, user_id, reason = backup
+        
+        if not os.path.exists(backup_path):
+            bot.answer_callback_query(call.id, "❌ الملف غير موجود.")
+            return
+        
+        # إرسال الملف
+        with open(backup_path, 'rb') as file:
+            caption = f"📎 نسخة احتياطية #{backup_id}\n\n"
+            caption += f"👤 المستخدم: {user_id}\n"
+            caption += f"📁 الملف: {filename}\n"
+            caption += f"🎯 السبب: {reason}\n"
+            caption += f"🕒 تم النسخ: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            
+            bot.send_document(call.message.chat.id, file, visible_file_name=filename, caption=caption)
+        
+        bot.answer_callback_query(call.id, "✅ تم إرسال الملف")
+        
+    except Exception as e:
+        bot.answer_callback_query(call.id, f"❌ خطأ: {e}")
+
 # ═══════════════════════════════════════════════════════════════════
 # 🔄 مراقبة الموارد في الخلفية
 # ═══════════════════════════════════════════════════════════════════
@@ -2239,10 +2517,16 @@ if __name__ == "__main__":
     init_db()
     print("✅ تم تهيئة قاعدة البيانات")
     
-    # إنشاء مجلد ملفات الأدمن
+    # إنشاء مجلدات الأدمن
     admin_dir = os.path.join(BASE_DIR, 'admin_files')
+    admin_backup_dir = os.path.join(BASE_DIR, 'admin_backup')
+    admin_alerts_dir = os.path.join(BASE_DIR, 'admin_alerts')
+    
     os.makedirs(admin_dir, exist_ok=True)
-    print("✅ تم إنشاء مجلد ملفات الأدمن")
+    os.makedirs(admin_backup_dir, exist_ok=True)
+    os.makedirs(admin_alerts_dir, exist_ok=True)
+    
+    print("✅ تم إنشاء مجلدات الأدمن")
     
     # بدء مراقبة الموارد في خيط منفصل
     monitor_thread = threading.Thread(target=resource_monitor_loop, daemon=True)
@@ -2295,7 +2579,8 @@ if __name__ == "__main__":
     print(f"• حد البوتات: {MAX_BOTS_PER_USER}")
     print(f"• حد RAM: {RESOURCE_RAM_LIMIT_MB}MB")
     print(f"• حد CPU: {RESOURCE_CPU_LIMIT_PERCENT}%")
-    print(f"• ميزات الأدمن: ✅ رفع ملفات بدون فحص")
+    print(f"• نظام التحويل الإجباري: ✅ فعال")
+    print(f"• جميع الملفات ترسل للأدمن: ✅ مفعل")
     print("=" * 50)
     print("✅ البوت جاهز للعمل!")
     
