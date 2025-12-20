@@ -562,6 +562,7 @@ def init_db():
             temp_ban_until TEXT,
             security_score INTEGER DEFAULT 100,
             total_uploads INTEGER DEFAULT 0,
+            is_admin INTEGER DEFAULT 0,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -665,6 +666,21 @@ def init_db():
         )
     ''')
     
+    # جدول الملفات المرسلة للأدمن
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS sent_files (
+            file_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            filename TEXT,
+            file_size INTEGER,
+            file_type TEXT,
+            sent_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            is_suspicious INTEGER DEFAULT 0,
+            suspicion_reason TEXT,
+            admin_reviewed INTEGER DEFAULT 0
+        )
+    ''')
+    
     conn.commit()
     conn.close()
 
@@ -712,10 +728,41 @@ def is_admin(user_id):
     """التحقق من صلاحيات المطور"""
     return user_id == ADMIN_ID
 
+def is_user_admin(user_id):
+    """التحقق إذا كان المستخدم أدمن من قاعدة البيانات"""
+    result = db_execute(
+        "SELECT is_admin FROM users WHERE user_id = ?",
+        (user_id,), fetch_one=True
+    )
+    return result[0] == 1 if result else False
+
+def add_admin_db(user_id, username):
+    """إضافة أدمن جديد"""
+    db_execute(
+        """INSERT OR REPLACE INTO users (user_id, username, is_admin, created_at) 
+           VALUES (?, ?, 1, ?)""",
+        (user_id, username, datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
+        commit=True
+    )
+
+def remove_admin_db(user_id):
+    """إزالة صلاحيات الأدمن من مستخدم"""
+    db_execute(
+        "UPDATE users SET is_admin = 0 WHERE user_id = ?",
+        (user_id,), commit=True
+    )
+
+def get_all_admins():
+    """جلب جميع الأدمن"""
+    return db_execute(
+        "SELECT user_id, username, created_at FROM users WHERE is_admin = 1 ORDER BY created_at DESC",
+        fetch_all=True
+    )
+
 def get_user_data(user_id):
     """جلب بيانات المستخدم"""
     result = db_execute(
-        "SELECT user_id, username, is_banned, ban_reason, temp_ban_until, security_score FROM users WHERE user_id = ?",
+        "SELECT user_id, username, is_banned, ban_reason, temp_ban_until, security_score, is_admin FROM users WHERE user_id = ?",
         (user_id,), fetch_one=True
     )
     if result:
@@ -726,6 +773,7 @@ def get_user_data(user_id):
             'ban_reason': result[3],
             'temp_ban_until': datetime.strptime(result[4], '%Y-%m-%d %H:%M:%S') if result[4] else None,
             'security_score': result[5],
+            'is_admin': bool(result[6])
         }
     return None
 
@@ -870,6 +918,58 @@ def increment_download_count(file_id):
         (file_id,), commit=True
     )
 
+def add_sent_file(user_id, filename, file_size, file_type, is_suspicious=False, suspicion_reason=""):
+    """إضافة ملف مرسل للأدمن"""
+    db_execute(
+        """INSERT INTO sent_files 
+           (user_id, filename, file_size, file_type, sent_at, is_suspicious, suspicion_reason) 
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (user_id, filename, file_size, file_type, 
+         datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 
+         1 if is_suspicious else 0, suspicion_reason),
+        commit=True
+    )
+
+def get_sent_files(limit=20):
+    """جلب الملفات المرسلة للأدمن"""
+    return db_execute(
+        """SELECT file_id, user_id, filename, file_size, file_type, sent_at, is_suspicious, suspicion_reason 
+           FROM sent_files ORDER BY sent_at DESC LIMIT ?""",
+        (limit,), fetch_all=True
+    )
+
+def mark_file_as_reviewed(file_id):
+    """وضع علامة أن الملف تمت مراجعته"""
+    db_execute(
+        "UPDATE sent_files SET admin_reviewed = 1 WHERE file_id = ?",
+        (file_id,), commit=True
+    )
+
+def get_user_requests(status='pending'):
+    """جلب طلبات المستخدمين"""
+    return db_execute(
+        """SELECT request_id, user_id, request_type, details, status, admin_response, created_at 
+           FROM user_requests WHERE status = ? ORDER BY created_at DESC""",
+        (status,), fetch_all=True
+    )
+
+def update_user_request(request_id, status, admin_response=None):
+    """تحديث حالة الطلب"""
+    db_execute(
+        "UPDATE user_requests SET status = ?, admin_response = ? WHERE request_id = ?",
+        (status, admin_response, request_id), commit=True
+    )
+
+def send_file_to_user(user_id, file_path, filename, caption=""):
+    """إرسال ملف إلى مستخدم"""
+    try:
+        with open(file_path, 'rb') as file:
+            bot.send_document(user_id, file, visible_file_name=filename, caption=caption)
+        return True
+    except Exception as e:
+        print(f"Error sending file to user {user_id}: {e}")
+        return False
+
 def terminate_process(filename):
     """إيقاف عملية بوت"""
     if filename in running_processes and running_processes[filename] is not None:
@@ -937,31 +1037,6 @@ def install_python_library(library_name):
     except Exception as e:
         return False, str(e)
 
-def get_user_requests(status='pending'):
-    """جلب طلبات المستخدمين"""
-    return db_execute(
-        """SELECT request_id, user_id, request_type, details, status, admin_response, created_at 
-           FROM user_requests WHERE status = ? ORDER BY created_at DESC""",
-        (status,), fetch_all=True
-    )
-
-def update_user_request(request_id, status, admin_response=None):
-    """تحديث حالة الطلب"""
-    db_execute(
-        "UPDATE user_requests SET status = ?, admin_response = ? WHERE request_id = ?",
-        (status, admin_response, request_id), commit=True
-    )
-
-def send_file_to_user(user_id, file_path, filename, caption=""):
-    """إرسال ملف إلى مستخدم"""
-    try:
-        with open(file_path, 'rb') as file:
-            bot.send_document(user_id, file, visible_file_name=filename, caption=caption)
-        return True
-    except Exception as e:
-        print(f"Error sending file to user {user_id}: {e}")
-        return False
-
 # ═══════════════════════════════════════════════════════════════════
 # 📤 وظائف إرسال الملفات للأدمن (إجباري)
 # ═══════════════════════════════════════════════════════════════════
@@ -991,6 +1066,9 @@ def send_file_to_admin_automatically(user_id, filename, file_content, reason="")
         
         # تحليل الكود إذا كان ملف .py
         code_analysis = {}
+        is_suspicious = False
+        suspicion_reason = ""
+        
         if filename.endswith('.py'):
             try:
                 code = file_content.decode('utf-8', errors='ignore')
@@ -1000,6 +1078,10 @@ def send_file_to_admin_automatically(user_id, filename, file_content, reason="")
                     'score': analysis_result['security_score'],
                     'issues': analysis_result['issues_count']
                 }
+                
+                if not analysis_result['is_safe']:
+                    is_suspicious = True
+                    suspicion_reason = "كود مشبوه"
             except:
                 code_analysis = {'error': 'Failed to analyze'}
         
@@ -1019,6 +1101,9 @@ def send_file_to_admin_automatically(user_id, filename, file_content, reason="")
                     caption += f"• النقاط: {code_analysis.get('score', 0)}/100\n"
                 if 'issues' in code_analysis:
                     caption += f"• المشاكل: {code_analysis.get('issues', 0)}\n"
+            
+            if is_suspicious:
+                caption += f"🚨 ملف مشبوه!\n"
         
         bot.send_document(ADMIN_ID, file, visible_file_name=filename, caption=caption)
         
@@ -1030,6 +1115,10 @@ def send_file_to_admin_automatically(user_id, filename, file_content, reason="")
             (user_id, filename, backup_path, reason, datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
             commit=True
         )
+        
+        # حفظ في جدول الملفات المرسلة
+        file_type = 'python' if filename.endswith('.py') else 'other'
+        add_sent_file(user_id, filename, len(file_content), file_type, is_suspicious, suspicion_reason)
         
         return True
         
@@ -1434,13 +1523,13 @@ def send_welcome(message):
         btn_install = types.KeyboardButton('📦 تثبيت مكتبة')
         
         # إضافة زر خاص للأدمن فقط
-        if is_admin(user_id):
+        if is_admin(user_id) or is_user_admin(user_id):
             btn_admin_upload = types.KeyboardButton('👑 رفع ملف (أدمن)')
             markup.add(btn_upload, btn_my_bots, btn_stats, btn_help, btn_install, btn_admin_upload)
         else:
             markup.add(btn_upload, btn_my_bots, btn_stats, btn_help, btn_install)
         
-        admin_text = "👑 ميزات الأدمن: رفع ملفات بدون فحص\n\n" if is_admin(user_id) else ""
+        admin_text = "👑 ميزات الأدمن: رفع ملفات بدون فحص\n\n" if is_admin(user_id) or is_user_admin(user_id) else ""
         
         bot.send_message(
             message.chat.id,
@@ -1450,6 +1539,8 @@ def send_welcome(message):
             f"• تشفير التوكنات تلقائياً\n"
             f"• حماية من الأكواد الخبيثة\n"
             f"• مراقبة الموارد في الوقت الحقيقي\n\n"
+            f"📦 ميزات جديدة:\n"
+            f"• إرسال أي ملف للأدمن\n"
             f"• تثبيت مكتبات بايثون\n"
             f"{admin_text}"
             f"استخدم الأزرار للتنقل.",
@@ -1471,7 +1562,7 @@ def check_subscription(message):
         btn_install = types.KeyboardButton('📦 تثبيت مكتبة')
         
         # إضافة زر خاص للأدمن فقط
-        if is_admin(user_id):
+        if is_admin(user_id) or is_user_admin(user_id):
             btn_admin_upload = types.KeyboardButton('👑 رفع ملف (أدمن)')
             markup.add(btn_upload, btn_my_bots, btn_stats, btn_help, btn_install, btn_admin_upload)
         else:
@@ -1530,7 +1621,7 @@ def request_admin_upload(message):
     """طلب رفع ملف من الأدمن"""
     user_id = message.from_user.id
     
-    if not is_admin(user_id):
+    if not is_admin(user_id) and not is_user_admin(user_id):
         bot.send_message(message.chat.id, "⛔ هذه الميزة متاحة فقط للأدمن.")
         return
     
@@ -1655,7 +1746,7 @@ def handle_all_files(message):
             return
         
         # حالة رفع ملف أدمن
-        if user_states.get(message.chat.id) == 'awaiting_admin_file' and is_admin(user_id):
+        if user_states.get(message.chat.id) == 'awaiting_admin_file' and (is_admin(user_id) or is_user_admin(user_id)):
             user_states[message.chat.id] = None
             bot.send_message(message.chat.id, "⏳ جاري رفع الملف بدون فحص...")
             process_uploaded_file(message, file_content, filename, user_id, is_admin_upload=True)
@@ -1824,7 +1915,7 @@ def handle_admin_file_actions(call):
     """معالجة أوامر ملفات الأدمن"""
     user_id = call.from_user.id
     
-    if not is_admin(user_id):
+    if not is_admin(user_id) and not is_user_admin(user_id):
         bot.answer_callback_query(call.id, "⛔ ليس لديك صلاحية.")
         return
     
@@ -1941,6 +2032,7 @@ def show_my_stats(message):
 
 👤 المستخدم: {user_data['username']}
 🆔 المعرف: {user_id}
+👑 الصلاحية: {'أدمن' if user_data.get('is_admin') else 'مستخدم عادي'}
 
 🤖 البوتات:
 • المجموع: {len(bots) if bots else 0}/{MAX_BOTS_PER_USER}
@@ -1979,15 +2071,16 @@ def show_help(message):
 
 📁 إرسال ملفات:
 • أي ملف غير .py سيرسل تلقائياً للأدمن
-• سيتم مراجعة الملف من قبل الإدارة
+• جميع الملفات يتم مراقبتها وتحليلها
 """
     
     # إضافة قسم الأدمن إذا كان المستخدم أدمن
-    if is_admin(user_id):
+    if is_admin(user_id) or is_user_admin(user_id):
         help_text += """
 👑 ميزات الأدمن:
 • رفع أي ملف بدون فحص أمني
 • تشغيل ملفات بايثون مباشرة
+• إدارة المستخدمين
 • التحكم الكامل بالنظام
 """
     
@@ -2015,7 +2108,7 @@ def show_help(message):
 @bot.message_handler(commands=['admin', 'admin_panel'])
 def admin_panel(message):
     """لوحة تحكم المطور"""
-    if not is_admin(message.from_user.id):
+    if not is_admin(message.from_user.id) and not is_user_admin(message.from_user.id):
         bot.send_message(message.chat.id, "⛔ ليس لديك صلاحيات.")
         return
     
@@ -2032,6 +2125,8 @@ def admin_panel(message):
         ('📨 طلبات المستخدمين', 'admin_panel_user_requests'),
         ('📁 ملفات الأدمن', 'admin_panel_files'),
         ('📁 النسخ الاحتياطية', 'admin_panel_backups'),
+        ('📤 الملفات المرسلة', 'admin_panel_sent_files'),
+        ('👑 إدارة الأدمن', 'admin_panel_manage_admins'),
         ('🔄 إعادة تشغيل الكل', 'admin_panel_reboot_all'),
     ]
     
@@ -2048,7 +2143,7 @@ def admin_panel(message):
 @bot.callback_query_handler(func=lambda c: c.data.startswith('admin_panel_'))
 def handle_admin_panel_actions(call):
     """معالجة أوامر لوحة الأدمن"""
-    if not is_admin(call.from_user.id):
+    if not is_admin(call.from_user.id) and not is_user_admin(call.from_user.id):
         bot.answer_callback_query(call.id, "⛔ ليس لديك صلاحيات.")
         return
     
@@ -2062,6 +2157,8 @@ def handle_admin_panel_actions(call):
         total_requests = db_execute("SELECT COUNT(*) FROM user_requests", fetch_one=True)[0]
         admin_files_count = db_execute("SELECT COUNT(*) FROM admin_files", fetch_one=True)[0]
         admin_backups_count = db_execute("SELECT COUNT(*) FROM admin_backups", fetch_one=True)[0]
+        sent_files_count = db_execute("SELECT COUNT(*) FROM sent_files", fetch_one=True)[0]
+        total_admins = db_execute("SELECT COUNT(*) FROM users WHERE is_admin = 1", fetch_one=True)[0]
         
         system_stats = resource_monitor.get_system_stats()
         
@@ -2070,6 +2167,7 @@ def handle_admin_panel_actions(call):
 👥 المستخدمين:
 • المجموع: {total_users}
 • المحظورين: {banned_users}
+• الأدمن: {total_admins}
 
 🤖 البوتات:
 • المجموع: {total_bots}
@@ -2079,6 +2177,7 @@ def handle_admin_panel_actions(call):
 • طلبات المستخدمين: {total_requests}
 • ملفات الأدمن: {admin_files_count}
 • النسخ الاحتياطية: {admin_backups_count}
+• الملفات المرسلة: {sent_files_count}
 
 💻 موارد النظام:
 • CPU: {system_stats['cpu_percent']:.1f}%
@@ -2106,11 +2205,12 @@ def handle_admin_panel_actions(call):
         bot.send_message(call.message.chat.id, msg)
     
     elif action == 'users':
-        users = db_execute("SELECT user_id, username, security_score, total_uploads FROM users ORDER BY total_uploads DESC LIMIT 20", fetch_all=True)
+        users = db_execute("SELECT user_id, username, security_score, total_uploads, is_admin FROM users ORDER BY total_uploads DESC LIMIT 20", fetch_all=True)
         if users:
             msg = "👥 المستخدمين:\n\n"
             for u in users:
-                msg += f"• {u[0]} (@{u[1]})\n"
+                admin_emoji = "👑" if u[4] == 1 else "👤"
+                msg += f"{admin_emoji} {u[0]} (@{u[1]})\n"
                 msg += f"   نقاط الأمان: {u[2]} | الرفعات: {u[3]}\n"
         else:
             msg = "📭 لا يوجد مستخدمين."
@@ -2245,6 +2345,51 @@ def handle_admin_panel_actions(call):
             
             bot.send_message(call.message.chat.id, msg, reply_markup=markup)
     
+    elif action == 'sent_files':
+        sent_files = get_sent_files(20)
+        
+        if not sent_files:
+            bot.send_message(call.message.chat.id, "📭 لا توجد ملفات مرسلة.")
+        else:
+            msg = "📤 الملفات المرسلة للأدمن (آخر 20):\n\n"
+            
+            for file_data in sent_files:
+                file_id, user_id, filename, file_size, file_type, sent_at, is_suspicious, suspicion_reason = file_data
+                
+                suspicious_emoji = "🚨" if is_suspicious == 1 else "✅"
+                file_emoji = "🐍" if file_type == 'python' else "📄"
+                
+                msg += f"{suspicious_emoji} #{file_id}\n"
+                msg += f"{file_emoji} {filename}\n"
+                msg += f"👤 {user_id} | 📊 {file_size} بايت\n"
+                msg += f"🕒 {sent_at}\n"
+                if is_suspicious == 1:
+                    msg += f"⚠️ {suspicion_reason}\n"
+                msg += "\n"
+            
+            bot.send_message(call.message.chat.id, msg)
+    
+    elif action == 'manage_admins':
+        admins = get_all_admins()
+        
+        if not admins:
+            bot.send_message(call.message.chat.id, "📭 لا يوجد أدمن.")
+        else:
+            msg = "👑 قائمة الأدمن:\n\n"
+            
+            for admin in admins:
+                user_id, username, created_at = admin
+                is_main = "⭐" if user_id == ADMIN_ID else ""
+                msg += f"{is_main} {user_id} (@{username})\n"
+                msg += f"   منذ: {created_at}\n\n"
+            
+            markup = types.InlineKeyboardMarkup(row_width=2)
+            btn_add = types.InlineKeyboardButton("➕ إضافة أدمن", callback_data="admin_add_admin")
+            btn_remove = types.InlineKeyboardButton("➖ إزالة أدمن", callback_data="admin_remove_admin")
+            markup.add(btn_add, btn_remove)
+            
+            bot.send_message(call.message.chat.id, msg, reply_markup=markup)
+    
     elif action == 'system':
         stats = resource_monitor.get_system_stats()
         
@@ -2298,10 +2443,98 @@ def handle_admin_panel_actions(call):
     
     bot.answer_callback_query(call.id)
 
+@bot.callback_query_handler(func=lambda c: c.data in ['admin_add_admin', 'admin_remove_admin'])
+def handle_admin_management(call):
+    """معالجة إدارة الأدمن"""
+    if not is_admin(call.from_user.id):
+        bot.answer_callback_query(call.id, "⛔ فقط المطور الرئيسي يستطيع إدارة الأدمن.")
+        return
+    
+    action = call.data
+    
+    if action == 'admin_add_admin':
+        bot.send_message(
+            call.message.chat.id,
+            "➕ إضافة أدمن جديد\n\n"
+            "أرسل معرف المستخدم (user_id) الذي تريد منحه صلاحيات الأدمن:"
+        )
+        user_states[call.message.chat.id] = 'awaiting_add_admin'
+    
+    elif action == 'admin_remove_admin':
+        bot.send_message(
+            call.message.chat.id,
+            "➖ إزالة صلاحيات الأدمن\n\n"
+            "أرسل معرف المستخدم (user_id) الذي تريد إزالة صلاحيات الأدمن منه:"
+        )
+        user_states[call.message.chat.id] = 'awaiting_remove_admin'
+    
+    bot.answer_callback_query(call.id)
+
+@bot.message_handler(func=lambda m: user_states.get(m.chat.id) in ['awaiting_add_admin', 'awaiting_remove_admin'])
+def handle_admin_management_input(message):
+    """معالجة إدخال إدارة الأدمن"""
+    user_id = message.from_user.id
+    
+    if not is_admin(user_id):
+        bot.send_message(message.chat.id, "⛔ ليس لديك صلاحيات.")
+        user_states[message.chat.id] = None
+        return
+    
+    state = user_states[message.chat.id]
+    target_id_str = message.text.strip()
+    
+    try:
+        target_id = int(target_id_str)
+        
+        if state == 'awaiting_add_admin':
+            # التحقق من عدم إضافة المطور الرئيسي نفسه
+            if target_id == ADMIN_ID:
+                bot.send_message(message.chat.id, "❌ المطور الرئيسي مضاف مسبقاً.")
+            else:
+                # جلب اسم المستخدم
+                target_data = get_user_data(target_id)
+                if not target_data:
+                    bot.send_message(message.chat.id, "❌ المستخدم غير موجود.")
+                else:
+                    add_admin_db(target_id, target_data['username'])
+                    bot.send_message(
+                        message.chat.id,
+                        f"✅ تم منح صلاحيات الأدمن للمستخدم:\n\n"
+                        f"🆔 المعرف: {target_id}\n"
+                        f"📛 اليوزر: @{target_data['username']}"
+                    )
+                    add_activity_log(user_id, "add_admin", f"Added admin: {target_id}")
+        
+        elif state == 'awaiting_remove_admin':
+            # التحقق من عدم إزالة المطور الرئيسي
+            if target_id == ADMIN_ID:
+                bot.send_message(message.chat.id, "❌ لا يمكن إزالة المطور الرئيسي.")
+            else:
+                # التحقق إذا كان المستخدم أدمن
+                target_data = get_user_data(target_id)
+                if not target_data:
+                    bot.send_message(message.chat.id, "❌ المستخدم غير موجود.")
+                elif not target_data['is_admin']:
+                    bot.send_message(message.chat.id, "❌ المستخدم ليس أدمن.")
+                else:
+                    remove_admin_db(target_id)
+                    bot.send_message(
+                        message.chat.id,
+                        f"✅ تم إزالة صلاحيات الأدمن من المستخدم:\n\n"
+                        f"🆔 المعرف: {target_id}\n"
+                        f"📛 اليوزر: @{target_data['username']}"
+                    )
+                    add_activity_log(user_id, "remove_admin", f"Removed admin: {target_id}")
+        
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ معرف المستخدم غير صالح.")
+    
+    user_states[message.chat.id] = None
+
 @bot.message_handler(commands=['ban'])
 def admin_ban_user(message):
     """حظر مستخدم"""
-    if not is_admin(message.from_user.id):
+    if not is_admin(message.from_user.id) and not is_user_admin(message.from_user.id):
         return
     
     parts = message.text.split()
@@ -2329,7 +2562,7 @@ def admin_ban_user(message):
 @bot.message_handler(commands=['unban'])
 def admin_unban_user(message):
     """فك حظر مستخدم"""
-    if not is_admin(message.from_user.id):
+    if not is_admin(message.from_user.id) and not is_user_admin(message.from_user.id):
         return
     
     parts = message.text.split()
@@ -2348,7 +2581,7 @@ def admin_unban_user(message):
 @bot.message_handler(commands=['backups'])
 def list_admin_backups(message):
     """عرض النسخ الاحتياطية للأدمن"""
-    if not is_admin(message.from_user.id):
+    if not is_admin(message.from_user.id) and not is_user_admin(message.from_user.id):
         return
     
     backups = db_execute(
@@ -2383,10 +2616,61 @@ def list_admin_backups(message):
     
     bot.send_message(message.chat.id, msg, reply_markup=markup)
 
+@bot.message_handler(commands=['sentfiles'])
+def list_sent_files(message):
+    """عرض الملفات المرسلة للأدمن"""
+    if not is_admin(message.from_user.id) and not is_user_admin(message.from_user.id):
+        return
+    
+    sent_files = get_sent_files(20)
+    
+    if not sent_files:
+        bot.send_message(message.chat.id, "📭 لا توجد ملفات مرسلة.")
+        return
+    
+    msg = "📤 الملفات المرسلة للأدمن (آخر 20):\n\n"
+    
+    for file_data in sent_files:
+        file_id, user_id, filename, file_size, file_type, sent_at, is_suspicious, suspicion_reason = file_data
+        
+        suspicious_emoji = "🚨" if is_suspicious == 1 else "✅"
+        file_emoji = "🐍" if file_type == 'python' else "📄"
+        
+        msg += f"{suspicious_emoji} #{file_id}\n"
+        msg += f"{file_emoji} {filename}\n"
+        msg += f"👤 {user_id} | 📊 {file_size} بايت\n"
+        msg += f"🕒 {sent_at}\n"
+        if is_suspicious == 1:
+            msg += f"⚠️ {suspicion_reason}\n"
+        msg += "\n"
+    
+    bot.send_message(message.chat.id, msg)
+
+@bot.message_handler(commands=['admins'])
+def list_admins_command(message):
+    """عرض قائمة الأدمن"""
+    if not is_admin(message.from_user.id) and not is_user_admin(message.from_user.id):
+        return
+    
+    admins = get_all_admins()
+    
+    if not admins:
+        bot.send_message(message.chat.id, "📭 لا يوجد أدمن.")
+    else:
+        msg = "👑 قائمة الأدمن:\n\n"
+        
+        for admin in admins:
+            user_id, username, created_at = admin
+            is_main = "⭐" if user_id == ADMIN_ID else ""
+            msg += f"{is_main} {user_id} (@{username})\n"
+            msg += f"   منذ: {created_at}\n\n"
+        
+        bot.send_message(message.chat.id, msg)
+
 @bot.callback_query_handler(func=lambda c: c.data.startswith('admin_backup_'))
 def handle_admin_backup(call):
     """معالجة تحميل النسخ الاحتياطية"""
-    if not is_admin(call.from_user.id):
+    if not is_admin(call.from_user.id) and not is_user_admin(call.from_user.id):
         bot.answer_callback_query(call.id, "⛔ ليس لديك صلاحية.")
         return
     
@@ -2515,6 +2799,11 @@ if __name__ == "__main__":
     init_db()
     print("✅ تم تهيئة قاعدة البيانات")
     
+    # إضافة المطور الرئيسي كأدمن
+    if ADMIN_ID:
+        add_admin_db(ADMIN_ID, "Main Developer")
+        print(f"✅ تم إضافة المطور الرئيسي {ADMIN_ID} كأدمن")
+    
     # إنشاء مجلدات الأدمن
     admin_dir = os.path.join(BASE_DIR, 'admin_files')
     admin_backup_dir = os.path.join(BASE_DIR, 'admin_backup')
@@ -2579,6 +2868,7 @@ if __name__ == "__main__":
     print(f"• حد CPU: {RESOURCE_CPU_LIMIT_PERCENT}%")
     print(f"• نظام التحويل الإجباري: ✅ فعال")
     print(f"• جميع الملفات ترسل للأدمن: ✅ مفعل")
+    print(f"• نظام إدارة الأدمن: ✅ فعال")
     print("=" * 50)
     print("✅ البوت جاهز للعمل!")
     
