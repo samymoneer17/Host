@@ -16,13 +16,13 @@ import hashlib
 import base64
 import shutil
 import signal
+import sys  # أضيف لعلاج مشكلة sys.executable
 from datetime import datetime, timedelta
 from collections import defaultdict
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-# في أعلى الملف مع باقي الـ imports
-import sys  # ← أضف هذا السطر
+
 # ═══════════════════════════════════════════════════════════════════
 # ⚙️ إعدادات البوت الأساسية
 # ═══════════════════════════════════════════════════════════════════
@@ -38,14 +38,14 @@ USERS_DIR = os.path.join(BASE_DIR, 'users')
 DATABASE_FILE = os.path.join(BASE_DIR, 'bot_data.db')
 LOGS_DIR = os.path.join(BASE_DIR, 'system_logs')
 
-# حدود الموارد
-MAX_FILE_SIZE_MB = 5
-MAX_BOTS_PER_USER = 3
-RESOURCE_CPU_LIMIT_PERCENT = 70
-RESOURCE_RAM_LIMIT_MB = 150
-RESOURCE_DISK_LIMIT_MB = 50
-MAX_PROCESSES_PER_USER = 10
-NETWORK_LIMIT_MB = 10
+# حدود الموارد (محدثة)
+MAX_FILE_SIZE_MB = 50  # زادت من 5 إلى 50
+MAX_BOTS_PER_USER = 10  # زادت من 3 إلى 10
+RESOURCE_CPU_LIMIT_PERCENT = 90  # زادت من 70 إلى 90
+RESOURCE_RAM_LIMIT_MB = 1024  # زادت من 150 إلى 1024 (1GB)
+RESOURCE_DISK_LIMIT_MB = 2048  # زادت من 50 إلى 2048 (2GB) ✅
+MAX_PROCESSES_PER_USER = 20  # زادت من 10 إلى 20
+NETWORK_LIMIT_MB = 100  # زادت من 10 إلى 100
 
 # إعدادات الأمان
 SECURITY_FAILURE_THRESHOLD = 5
@@ -322,12 +322,38 @@ class SandboxManager:
             if os.path.exists(os.path.join(venv_dir, 'pyvenv.cfg')):
                 return True
             
-            # إنشاء virtual environment جديدة
-            subprocess.run(
-                [sys.executable, '-m', 'venv', venv_dir],
-                check=True,
-                capture_output=True
-            )
+            # محاولة استخدام python3 أولاً، ثم python
+            python_commands = ['python3', 'python']
+            command_success = False
+            
+            for python_cmd in python_commands:
+                try:
+                    result = subprocess.run(
+                        [python_cmd, '-c', 'import sys; print(sys.version)'],
+                        capture_output=True,
+                        text=True
+                    )
+                    if result.returncode == 0:
+                        # استخدم هذا الأمر لإنشاء venv
+                        subprocess.run(
+                            [python_cmd, '-m', 'venv', venv_dir],
+                            check=True,
+                            capture_output=True,
+                            timeout=60
+                        )
+                        command_success = True
+                        break
+                except:
+                    continue
+            
+            if not command_success:
+                # استخدام sys.executable إذا فشلت المحاولات
+                subprocess.run(
+                    [sys.executable, '-m', 'venv', venv_dir],
+                    check=True,
+                    capture_output=True,
+                    timeout=60
+                )
             
             # إنشاء ملف requirements.txt افتراضي
             requirements_file = os.path.join(user_dir, 'requirements.txt')
@@ -392,14 +418,30 @@ requests>=2.28.0
     def install_library_for_user(self, user_id: int, library_name: str) -> tuple:
         """تثبيت مكتبة في venv المستخدم"""
         try:
-            python_path = self.get_user_venv_python(user_id)
+            user_dir = os.path.join(self.base_dir, f"user_{user_id}")
+            venv_dir = os.path.join(user_dir, 'venv')
             
-            # استخدام pip من نفس البيئة
-            if os.name == 'nt':
-                pip_path = python_path.replace('python.exe', 'pip.exe')
-            else:
-                pip_path = python_path.replace('python', 'pip')
+            # التحقق من وجود venv
+            if not os.path.exists(venv_dir):
+                success = self.create_venv_for_user(user_id)
+                if not success:
+                    return False, "فشل إنشاء البيئة الافتراضية"
             
+            # استخدام pip من الـ venv
+            if os.name == 'nt':  # Windows
+                pip_path = os.path.join(venv_dir, 'Scripts', 'pip')
+                python_path = os.path.join(venv_dir, 'Scripts', 'python')
+            else:  # Linux/Mac
+                pip_path = os.path.join(venv_dir, 'bin', 'pip')
+                python_path = os.path.join(venv_dir, 'bin', 'python')
+            
+            # التحقق من وجود pip
+            if not os.path.exists(pip_path):
+                # إذا لم يكن pip موجوداً، قم بتثبيته
+                subprocess.run([python_path, '-m', 'ensurepip'], 
+                              capture_output=True, timeout=30)
+            
+            # تثبيت المكتبة
             result = subprocess.run(
                 [pip_path, 'install', library_name],
                 capture_output=True,
@@ -415,7 +457,7 @@ requests>=2.28.0
         except subprocess.TimeoutExpired:
             return False, "انتهى الوقت المحدد للتثبيت"
         except Exception as e:
-            return False, str(e)
+            return False, f"خطأ: {str(e)}"
     
     def get_user_requirements(self, user_id: int) -> str:
         """جلب قائمة المكتبات المثبتة للمستخدم"""
@@ -876,6 +918,31 @@ def is_user_admin(user_id):
     )
     return result[0] == 1 if result else False
 
+def is_admin_user(user_id):
+    """التحقق إذا كان المستخدم أدمن"""
+    return is_admin(user_id) or is_user_admin(user_id)
+
+def get_user_limits(user_id):
+    """جلب حدود المستخدم مع استثناء الأدمن"""
+    if is_admin_user(user_id):
+        # الأدمن بدون حدود
+        return {
+            'max_bots': 100,  # غير محدود عملياً
+            'max_file_size_mb': 100,
+            'cpu_limit_percent': 100,
+            'ram_limit_mb': 4096,  # 4GB
+            'disk_limit_mb': 10240,  # 10GB
+        }
+    else:
+        # المستخدم العادي
+        return {
+            'max_bots': MAX_BOTS_PER_USER,
+            'max_file_size_mb': MAX_FILE_SIZE_MB,
+            'cpu_limit_percent': RESOURCE_CPU_LIMIT_PERCENT,
+            'ram_limit_mb': RESOURCE_RAM_LIMIT_MB,
+            'disk_limit_mb': RESOURCE_DISK_LIMIT_MB,
+        }
+
 def add_admin_db(user_id, username):
     """إضافة أدمن جديد"""
     db_execute(
@@ -1159,8 +1226,57 @@ def terminate_process(filename):
     return False
 
 def install_python_library(user_id, library_name):
-    """تثبيت مكتبة في venv المستخدم"""
-    return sandbox_manager.install_library_for_user(user_id, library_name)
+    """تثبيت مكتبة في venv المستخدم (مع معاملة خاصة للأدمن)"""
+    try:
+        # الأدمن له أولوية
+        if is_admin_user(user_id):
+            bot.send_message(user_id, f"👑 تثبيت مكتبة للأدمن: {library_name}")
+        
+        python_path = sandbox_manager.get_user_venv_python(user_id)
+        
+        # استخدام pip من نفس البيئة
+        if os.name == 'nt':
+            pip_path = python_path.replace('python.exe', 'pip.exe')
+        else:
+            pip_path = python_path.replace('python', 'pip')
+        
+        # تأكد من وجود pip
+        if not os.path.exists(pip_path):
+            # تثبيت pip إذا لم يكن موجوداً
+            subprocess.run([python_path, '-m', 'ensurepip', '--upgrade'],
+                          capture_output=True, timeout=30)
+        
+        # للأدمن: تثبيت مع ترقية
+        if is_admin_user(user_id):
+            cmd = [pip_path, 'install', '--upgrade', library_name]
+        else:
+            cmd = [pip_path, 'install', library_name]
+        
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=180  # زيادة الوقت للأدمن
+        )
+        
+        if result.returncode == 0:
+            # للأدمن: تثبيت المكتبات الضرورية تلقائياً
+            if is_admin_user(user_id):
+                # تثبيت مكتبات شائعة للأدمن
+                common_libs = ['cloudpickle', 'numpy', 'pandas', 'flask', 'django']
+                for lib in common_libs:
+                    if lib.lower() in library_name.lower():
+                        subprocess.run([pip_path, 'install', lib],
+                                     capture_output=True, timeout=60)
+            
+            return True, result.stdout
+        else:
+            return False, result.stderr
+            
+    except subprocess.TimeoutExpired:
+        return False, "انتهى الوقت المحدد للتثبيت"
+    except Exception as e:
+        return False, str(e)
 
 # ═══════════════════════════════════════════════════════════════════
 # 📤 وظائف إرسال الملفات للأدمن (إجباري)
@@ -1380,7 +1496,7 @@ def is_subscribed(user_id, channel_id_str):
 def process_uploaded_file(message, file_content: bytes, filename: str, user_id: int, is_admin_upload=False):
     """معالجة الملف المرفوع مع جميع طبقات الأمان"""
     
-    # إذا كان أدمن يرفع ملف، تجاوز جميع الفحوصات
+    # إذا كان أدمن يرفع ملف، استخدام معالجة خاصة
     if is_admin_upload:
         return process_admin_file(message, file_content, filename, user_id)
     
@@ -1468,15 +1584,16 @@ def process_uploaded_file(message, file_content: bytes, filename: str, user_id: 
     sandbox = sandbox_manager.get_user_sandbox(user_id)
     file_path = os.path.join(sandbox['bots'], filename)
     
-    # التحقق من استخدام القرص
-    disk_usage = sandbox_manager.get_user_disk_usage(user_id)
-    if disk_usage + (len(file_content) / (1024 * 1024)) > RESOURCE_DISK_LIMIT_MB:
-        bot.send_message(
-            message.chat.id,
-            f"❌ تجاوزت الحد المسموح لمساحة التخزين ({RESOURCE_DISK_LIMIT_MB}MB)!\n"
-            "يرجى حذف بعض البوتات القديمة."
-        )
-        return False
+    # التحقق من استخدام القرص (باستثناء الأدمن)
+    if not is_admin_user(user_id):
+        disk_usage = sandbox_manager.get_user_disk_usage(user_id)
+        if disk_usage + (len(file_content) / (1024 * 1024)) > get_user_limits(user_id)['disk_limit_mb']:
+            bot.send_message(
+                message.chat.id,
+                f"❌ تجاوزت الحد المسموح لمساحة التخزين ({get_user_limits(user_id)['disk_limit_mb']}MB)!\n"
+                "يرجى حذف بعض البوتات القديمة."
+            )
+            return False
     
     # حفظ الملف
     with open(file_path, 'wb') as f:
@@ -1500,8 +1617,8 @@ def process_uploaded_file(message, file_content: bytes, filename: str, user_id: 
                 start_new_session=True,
                 env={
                     **os.environ,
-                    'PYTHONPATH': sandbox['bots'],  # إضافة مسار البوتات
-                    'VIRTUAL_ENV': sandbox['venv'],  # تحديد الـ venv
+                    'PYTHONPATH': sandbox['bots'],
+                    'VIRTUAL_ENV': sandbox['venv'],
                 }
             )
             
@@ -1549,14 +1666,13 @@ def process_uploaded_file(message, file_content: bytes, filename: str, user_id: 
         return False
 
 def process_admin_file(message, file_content: bytes, filename: str, admin_id: int):
-    """معالجة ملفات الأدمن بدون فحص"""
+    """معالجة ملفات الأدمن باستخدام نفس مسار المستخدم"""
     try:
-        # إنشاء مجلد خاص للأدمن إذا لم يكن موجوداً
-        admin_dir = os.path.join(BASE_DIR, 'admin_files')
-        os.makedirs(admin_dir, exist_ok=True)
+        # استخدام نفس sandbox الأدمن (user_7627857345)
+        sandbox = sandbox_manager.get_user_sandbox(admin_id)
         
-        # حفظ الملف
-        file_path = os.path.join(admin_dir, filename)
+        # حفظ الملف في مجلد بوتات الأدمن
+        file_path = os.path.join(sandbox['bots'], filename)
         
         with open(file_path, 'wb') as f:
             f.write(file_content)
@@ -1571,36 +1687,56 @@ def process_admin_file(message, file_content: bytes, filename: str, admin_id: in
             is_public=False
         )
         
-        # إرسال تأكيد
-        bot.send_message(
-            message.chat.id,
-            f"✅ تم رفع الملف بنجاح بدون فحص!\n\n"
-            f"📁 الملف: {filename}\n"
-            f"📊 الحجم: {len(file_content)} بايت\n"
-            f"📁 المسار: {file_path}\n\n"
-            f"⚠️ ملاحظة: الملف تم رفعه بدون أي فحوصات أمنية."
-        )
+        # تشغيل الملف مباشرة من مسار الأدمن
+        bot.send_message(message.chat.id, "⏳ جاري تشغيل الملف من بيئة الأدمن...")
         
-        add_activity_log(admin_id, "admin_file_upload", f"File: {filename}, Size: {len(file_content)}")
+        python_path = sandbox_manager.get_user_venv_python(admin_id)
+        bot_stdout = os.path.join(sandbox['logs'], f"{filename}.stdout")
+        bot_stderr = os.path.join(sandbox['logs'], f"{filename}.stderr")
         
-        # إذا كان ملف .py، يمكن تشغيله
-        if filename.endswith('.py'):
-            markup = types.InlineKeyboardMarkup()
-            btn_run = types.InlineKeyboardButton("▶️ تشغيل الملف", callback_data=f"admin_file_run_{filename}")
-            btn_delete = types.InlineKeyboardButton("🗑 حذف الملف", callback_data=f"admin_file_delete_{filename}")
-            markup.add(btn_run, btn_delete)
-            
-            bot.send_message(
-                message.chat.id,
-                "🤖 الملف قابل للتشغيل.\n"
-                "هل تريد تشغيله الآن؟",
-                reply_markup=markup
+        with open(bot_stdout, 'w') as stdout_f, open(bot_stderr, 'w') as stderr_f:
+            process = subprocess.Popen(
+                [python_path, file_path],
+                cwd=sandbox['bots'],
+                stdout=stdout_f,
+                stderr=stderr_f,
+                close_fds=True,
+                start_new_session=True
             )
+            
+            # حفظ كبوت عادي (لكن للأدمن)
+            running_processes[filename] = process
+            resource_monitor.add_process(filename, process.pid, admin_id)
+            add_hosted_bot_db(admin_id, filename, process.pid, 'running', bot_username="Admin Bot", bot_name="Admin File")
+            
+            time.sleep(2)
+            
+            if process.poll() is None:
+                bot.send_message(
+                    message.chat.id,
+                    f"✅ تم رفع وتشغيل الملف بنجاح!\n\n"
+                    f"📁 الملف: {filename}\n"
+                    f"📊 الحجم: {len(file_content)} بايت\n"
+                    f"🐍 بيئة: venv الأدمن\n"
+                    f"🔧 المكتبات: متاحة بالكامل\n"
+                    f"📁 المسار: {file_path}"
+                )
+                
+                add_activity_log(admin_id, "admin_file_run", f"File: {filename}")
+                
+            else:
+                with open(bot_stderr, 'r') as err_f:
+                    stderr_output = err_f.read().strip()
+                
+                bot.send_message(
+                    message.chat.id,
+                    f"❌ حدث خطأ أثناء التشغيل:\n\n```\n{stderr_output[:500]}\n```"
+                )
         
         return True
         
     except Exception as e:
-        bot.send_message(message.chat.id, f"❌ خطأ في رفع الملف: {e}")
+        bot.send_message(message.chat.id, f"❌ خطأ: {e}")
         return False
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1656,7 +1792,7 @@ def send_welcome(message):
         btn_install = types.KeyboardButton('📦 تثبيت مكتبة')
         
         # إضافة زر خاص للأدمن فقط
-        if is_admin(user_id) or is_user_admin(user_id):
+        if is_admin_user(user_id):
             btn_admin_upload = types.KeyboardButton('👑 رفع ملف (أدمن)')
             markup.add(btn_upload, btn_my_bots, btn_stats, btn_help, btn_install, btn_admin_upload)
         else:
@@ -1665,7 +1801,9 @@ def send_welcome(message):
         btn_my_libs = types.KeyboardButton('📚 مكتباتي')
         markup.add(btn_my_libs)
         
-        admin_text = "👑 ميزات الأدمن: رفع ملفات بدون فحص\n\n" if is_admin(user_id) or is_user_admin(user_id) else ""
+        admin_text = "👑 ميزات الأدمن: رفع ملفات بدون فحص\n\n" if is_admin_user(user_id) else ""
+        
+        limits = get_user_limits(user_id)
         
         bot.send_message(
             message.chat.id,
@@ -1675,7 +1813,10 @@ def send_welcome(message):
             f"• تشفير التوكنات تلقائياً\n"
             f"• حماية من الأكواد الخبيثة\n"
             f"• مراقبة الموارد في الوقت الحقيقي\n\n"
-            f"• تثبيت مكتبات بايثون\n"
+            f"📊 حدود حسابك:\n"
+            f"• البوتات: {limits['max_bots']}\n"
+            f"• التخزين: {limits['disk_limit_mb']}MB\n"
+            f"• الذاكرة: {limits['ram_limit_mb']}MB\n\n"
             f"{admin_text}"
             f"استخدم الأزرار للتنقل.",
             reply_markup=markup
@@ -1696,7 +1837,7 @@ def check_subscription(message):
         btn_install = types.KeyboardButton('📦 تثبيت مكتبة')
         
         # إضافة زر خاص للأدمن فقط
-        if is_admin(user_id) or is_user_admin(user_id):
+        if is_admin_user(user_id):
             btn_admin_upload = types.KeyboardButton('👑 رفع ملف (أدمن)')
             markup.add(btn_upload, btn_my_bots, btn_stats, btn_help, btn_install, btn_admin_upload)
         else:
@@ -1733,10 +1874,12 @@ def request_file_upload(message):
         return
     
     bot_count = get_user_bot_count(user_id)
-    if bot_count >= MAX_BOTS_PER_USER:
+    limits = get_user_limits(user_id)
+    
+    if bot_count >= limits['max_bots']:
         bot.send_message(
             message.chat.id,
-            f"❌ وصلت للحد الأقصى ({MAX_BOTS_PER_USER} بوتات)!\n"
+            f"❌ وصلت للحد الأقصى ({limits['max_bots']} بوتات)!\n"
             "احذف بوتاً قديماً لرفع بوت جديد."
         )
         return
@@ -1748,7 +1891,7 @@ def request_file_upload(message):
         "⚠️ متطلبات الملف:\n"
         "• يجب أن يحتوي على توكن بوت تيليجرام صالح\n"
         "• يجب أن يكون بصيغة .py\n"
-        "• الحد الأقصى للحجم: 5MB\n\n"
+        f"• الحد الأقصى للحجم: {limits['max_file_size_mb']}MB\n\n"
         "ملاحظة: أي ملف غير .py سيرسل تلقائياً للأدمن."
     )
     add_activity_log(user_id, "request_upload", "")
@@ -1758,19 +1901,26 @@ def request_admin_upload(message):
     """طلب رفع ملف من الأدمن"""
     user_id = message.from_user.id
     
-    if not is_admin(user_id) and not is_user_admin(user_id):
+    if not is_admin_user(user_id):
         bot.send_message(message.chat.id, "⛔ هذه الميزة متاحة فقط للأدمن.")
         return
     
     user_states[message.chat.id] = 'awaiting_admin_file'
+    
+    limits = get_user_limits(user_id)
+    
     bot.send_message(
         message.chat.id,
-        "👑 رفع ملف أدمن (بدون فحص)\n\n"
-        "⚠️ تحذير:\n"
-        "• الملفات التي ترفعها سيتم معالجتها بدون أي فحوصات أمنية\n"
-        "• أنت المسؤول عن أي ضرر قد يسببه الملف\n"
-        "• الملفات تحفظ في مجلد خاص بالأدمن\n\n"
-        "أرسل الملف الذي تريد رفعه:"
+        f"👑 رفع ملف أدمن (بدون فحص)\n\n"
+        f"📊 حدود الأدمن:\n"
+        f"• التخزين: {limits['disk_limit_mb']}MB\n"
+        f"• الذاكرة: {limits['ram_limit_mb']}MB\n"
+        f"• المعالج: {limits['cpu_limit_percent']}%\n\n"
+        f"⚠️ تحذير:\n"
+        f"• الملفات التي ترفعها سيتم معالجتها بدون أي فحوصات أمنية\n"
+        f"• أنت المسؤول عن أي ضرر قد يسببه الملف\n"
+        f"• الملفات تحفظ في مسار: users/user_{user_id}/bot_files/\n\n"
+        f"أرسل الملف الذي تريد رفعه:"
     )
     add_activity_log(user_id, "admin_upload_request", "")
 
@@ -1832,48 +1982,6 @@ def show_my_libraries(message):
     
     bot.send_message(message.chat.id, msg)
 
-@bot.callback_query_handler(func=lambda c: c.data == 'admin_panel_venvs')
-def handle_admin_venvs(call):
-    """عرض معلومات بيئات المستخدمين"""
-    if not is_admin(call.from_user.id) and not is_user_admin(call.from_user.id):
-        bot.answer_callback_query(call.id, "⛔ ليس لديك صلاحيات.")
-        return
-    
-    # جلب إحصائيات الـ venv
-    users = db_execute(
-        "SELECT user_id, username FROM users ORDER BY created_at DESC LIMIT 10",
-        fetch_all=True
-    )
-    
-    msg = "🐍 بيئات المستخدمين الافتراضية:\n\n"
-    
-    if users:
-        for user in users:
-            user_id = user[0]
-            username = user[1]
-            
-            user_dir = os.path.join(USERS_DIR, f"user_{user_id}")
-            venv_dir = os.path.join(user_dir, 'venv')
-            
-            if os.path.exists(venv_dir):
-                venv_size = 0
-                for dirpath, dirnames, filenames in os.walk(venv_dir):
-                    for f in filenames:
-                        fp = os.path.join(dirpath, f)
-                        if os.path.exists(fp):
-                            venv_size += os.path.getsize(fp)
-                venv_size_mb = venv_size / (1024 * 1024)
-                
-                # جلب عدد المكتبات
-                libraries = sandbox_manager.get_user_requirements(user_id)
-                lib_count = len(libraries.strip().split('\n')) if libraries.strip() and "خطأ" not in libraries else 0
-                
-                msg += f"👤 {user_id} (@{username})\n"
-                msg += f"   حجم الـ venv: {venv_size_mb:.1f}MB\n"
-                msg += f"   المكتبات: {lib_count}\n\n"
-    
-    bot.send_message(call.message.chat.id, msg)
-
 @bot.message_handler(func=lambda m: user_states.get(m.chat.id) == 'awaiting_library_name')
 def handle_library_install(message):
     """معالجة تثبيت المكتبة"""
@@ -1882,15 +1990,41 @@ def handle_library_install(message):
     
     user_states[message.chat.id] = None
     
-    library_name = message.text.strip()
+    library_name = message.text.strip().lower()
     
     if not library_name:
         bot.send_message(message.chat.id, "❌ يرجى إرسال اسم مكتبة صالح.")
         return
     
-    # التحقق من الأمان (يمكن إضافة فحص هنا إذا لزم الأمر)
+    # تصحيح الأخطاء الشائعة
+    library_corrections = {
+        'request': 'requests',
+        'telegram': 'pyTelegramBotAPI',
+        'telebot': 'pyTelegramBotAPI',
+        'crypto': 'cryptography',
+        'hash': 'hashlib',
+        'date': 'datetime',
+        'time': 'datetime',
+        'json': None,
+        'os': None,
+        'sys': None,
+        'cloudpickle': 'cloudpickle',
+    }
     
-    bot.send_message(message.chat.id, f"⏳ جاري تثبيت المكتبة: {library_name}\n(يتم التثبيت في بيئتك المعزولة)")
+    if library_name in library_corrections:
+        corrected = library_corrections[library_name]
+        if corrected:
+            library_name = corrected
+            bot.send_message(message.chat.id, f"📝 تم تصحيح المكتبة إلى: {library_name}")
+        else:
+            bot.send_message(message.chat.id, f"ℹ️ المكتبة '{library_name}' مدمجة مع بايثون ولا تحتاج تثبيت.")
+            return
+    
+    # للأدمن: إشعار خاص
+    if is_admin_user(user_id):
+        bot.send_message(message.chat.id, f"👑 تثبيت مكتبة للأدمن: {library_name}\n⏳ قد يستغرق دقيقة...")
+    else:
+        bot.send_message(message.chat.id, f"⏳ جاري تثبيت المكتبة: {library_name}")
     
     success, output = install_python_library(user_id, library_name)
     
@@ -1904,7 +2038,7 @@ def handle_library_install(message):
         add_activity_log(user_id, "library_installed", f"Library: {library_name}")
         
         # إعلام الأدمن
-        if ADMIN_ID:
+        if ADMIN_ID and user_id != ADMIN_ID:
             try:
                 bot.send_message(
                     ADMIN_ID,
@@ -1916,13 +2050,14 @@ def handle_library_install(message):
             except Exception as e:
                 print(f"Error sending to admin: {e}")
     else:
+        error_msg = output[:500]
         bot.send_message(
             message.chat.id,
             f"❌ فشل تثبيت المكتبة!\n\n"
             f"المكتبة: {library_name}\n\n"
-            f"الخطأ:\n```\n{output[:500]}\n```"
+            f"الخطأ:\n```\n{error_msg}\n```"
         )
-        add_security_log(user_id, "library_install_failed", f"Library: {library_name}, Error: {output[:200]}")
+        add_security_log(user_id, "library_install_failed", f"Library: {library_name}, Error: {error_msg}")
 
 @bot.message_handler(content_types=['document'])
 def handle_all_files(message):
@@ -1946,19 +2081,21 @@ def handle_all_files(message):
         file_info = bot.get_file(message.document.file_id)
         file_content = bot.download_file(file_info.file_path)
         
+        limits = get_user_limits(user_id)
+        
         # التحقق من الحجم
-        if len(file_content) > MAX_FILE_SIZE_MB * 1024 * 1024:
+        if len(file_content) > limits['max_file_size_mb'] * 1024 * 1024:
             bot.send_message(
                 message.chat.id,
                 f"❌ حجم الملف كبير جداً!\n"
-                f"الحد المسموح: {MAX_FILE_SIZE_MB}MB"
+                f"الحد المسموح: {limits['max_file_size_mb']}MB"
             )
             return
         
         # حالة رفع ملف أدمن
-        if user_states.get(message.chat.id) == 'awaiting_admin_file' and (is_admin(user_id) or is_user_admin(user_id)):
+        if user_states.get(message.chat.id) == 'awaiting_admin_file' and is_admin_user(user_id):
             user_states[message.chat.id] = None
-            bot.send_message(message.chat.id, "⏳ جاري رفع الملف بدون فحص...")
+            bot.send_message(message.chat.id, "👑 جاري رفع الملف بدون فحص...")
             process_uploaded_file(message, file_content, filename, user_id, is_admin_upload=True)
         
         # إذا كان ملف بوت (.py) وكان في حالة انتظار ملف بوت
@@ -1985,6 +2122,7 @@ def handle_all_files(message):
                 f"✅ تم معالجة ملفك بنجاح!\n\n"
                 f"📄 الملف: {filename}\n"
                 f"📊 الحجم: {len(file_content)} بايت\n"
+                f"📤 تم إرسال نسخة للأدمن تلقائياً"
             )
         
     except Exception as e:
@@ -2075,9 +2213,11 @@ def handle_user_bot_actions(call):
                 bot_stdout = os.path.join(sandbox['logs'], f"{filename}.stdout")
                 bot_stderr = os.path.join(sandbox['logs'], f"{filename}.stderr")
                 
+                python_path = sandbox_manager.get_user_venv_python(user_id)
+                
                 with open(bot_stdout, 'w') as stdout_f, open(bot_stderr, 'w') as stderr_f:
                     process = subprocess.Popen(
-                        ['python3', file_path],
+                        [python_path, file_path],
                         cwd=sandbox['bots'],
                         stdout=stdout_f,
                         stderr=stderr_f,
@@ -2120,99 +2260,60 @@ def handle_user_bot_actions(call):
     
     bot.answer_callback_query(call.id)
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith('admin_file_'))
-def handle_admin_file_actions(call):
-    """معالجة أوامر ملفات الأدمن"""
-    user_id = call.from_user.id
-    
-    if not is_admin(user_id) and not is_user_admin(user_id):
+@bot.callback_query_handler(func=lambda c: c.data.startswith('admin_run_'))
+def handle_admin_run_file(call):
+    """تشغيل ملفات الأدمن من مساره"""
+    if not is_admin_user(call.from_user.id):
         bot.answer_callback_query(call.id, "⛔ ليس لديك صلاحية.")
         return
     
-    # إزالة البادئة
-    data = call.data.replace('admin_file_', '')
+    filename = call.data.replace('admin_run_', '')
+    admin_id = call.from_user.id
     
-    # تقسيم إلى أجزاء
-    parts = data.split('_', 1)
+    sandbox = sandbox_manager.get_user_sandbox(admin_id)
+    file_path = os.path.join(sandbox['bots'], filename)
     
-    if len(parts) < 2:
-        bot.answer_callback_query(call.id, "❌ بيانات غير صالحة.")
-        return
-    
-    action = parts[0]
-    filename = parts[1]
-    
-    admin_dir = os.path.join(BASE_DIR, 'admin_files')
-    file_path = os.path.join(admin_dir, filename)
-    
-    if action == 'run':
-        if os.path.exists(file_path):
-            try:
-                # تشغيل الملف
-                bot_stdout = os.path.join(admin_dir, f"{filename}.stdout")
-                bot_stderr = os.path.join(admin_dir, f"{filename}.stderr")
-                
-                with open(bot_stdout, 'w') as stdout_f, open(bot_stderr, 'w') as stderr_f:
-                    process = subprocess.Popen(
-                        ['python3', file_path],
-                        cwd=admin_dir,
-                        stdout=stdout_f,
-                        stderr=stderr_f,
-                        close_fds=True,
-                        start_new_session=True
-                    )
-                    
-                    # استخدام اسم فريد للعمليات الإدارية
-                    admin_filename = f"admin_{filename}"
-                    running_processes[admin_filename] = process
-                    resource_monitor.add_process(admin_filename, process.pid, user_id)
-                    
-                    time.sleep(2)
-                    
-                    if process.poll() is None:
-                        bot.send_message(
-                            call.message.chat.id,
-                            f"✅ تم تشغيل ملف الأدمن بنجاح!\n\n"
-                            f"📁 الملف: {filename}\n"
-                            f"🆔 PID: {process.pid}\n\n"
-                            f"⚠️ ملاحظة: الملف يعمل بدون أي فحوصات أمنية."
-                        )
-                        add_activity_log(user_id, "admin_file_run", f"File: {filename}, PID: {process.pid}")
-                    else:
-                        with open(bot_stderr, 'r') as err_f:
-                            stderr_output = err_f.read().strip()
-                        
-                        bot.send_message(
-                            call.message.chat.id,
-                            f"❌ حدث خطأ أثناء تشغيل الملف:\n\n{stderr_output[:500]}..."
-                        )
-            except Exception as e:
-                bot.send_message(call.message.chat.id, f"❌ خطأ في تشغيل الملف: {e}")
-        else:
-            bot.send_message(call.message.chat.id, "❌ ملف الأدمن غير موجود!")
-    
-    elif action == 'delete':
+    if os.path.exists(file_path):
         try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
+            python_path = sandbox_manager.get_user_venv_python(admin_id)
             
-            # حذف ملفات السجلات
-            for ext in ['.stdout', '.stderr']:
-                log_file = os.path.join(admin_dir, f"{filename}{ext}")
-                if os.path.exists(log_file):
-                    os.remove(log_file)
+            bot_stdout = os.path.join(sandbox['logs'], f"{filename}.stdout")
+            bot_stderr = os.path.join(sandbox['logs'], f"{filename}.stderr")
             
-            # إيقاف العملية إذا كانت شغالة
-            admin_filename = f"admin_{filename}"
-            if admin_filename in running_processes:
-                terminate_process(admin_filename)
-            
-            bot.send_message(call.message.chat.id, f"✅ تم حذف ملف الأدمن: {filename}")
-            add_activity_log(user_id, "admin_file_delete", filename)
+            with open(bot_stdout, 'w') as stdout_f, open(bot_stderr, 'w') as stderr_f:
+                process = subprocess.Popen(
+                    [python_path, file_path],
+                    cwd=sandbox['bots'],
+                    stdout=stdout_f,
+                    stderr=stderr_f,
+                    close_fds=True,
+                    start_new_session=True
+                )
+                
+                running_processes[f"admin_{filename}"] = process
+                resource_monitor.add_process(f"admin_{filename}", process.pid, admin_id)
+                add_hosted_bot_db(admin_id, filename, process.pid, 'running', bot_username="Admin Bot", bot_name="Admin File")
+                
+                bot.send_message(
+                    call.message.chat.id,
+                    f"✅ تم تشغيل الملف بنجاح!\n\n"
+                    f"📁 الملف: {filename}\n"
+                    f"🐍 بيئة: venv الأدمن\n"
+                    f"🆔 PID: {process.pid}\n"
+                    f"📁 المسار: {file_path}"
+                )
+                add_activity_log(admin_id, "admin_file_run", f"File: {filename}")
         except Exception as e:
-            bot.send_message(call.message.chat.id, f"❌ خطأ في الحذف: {e}")
+            bot.send_message(call.message.chat.id, f"❌ خطأ: {e}")
+    else:
+        bot.send_message(call.message.chat.id, "❌ الملف غير موجود!")
     
     bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith('admin_file_'))
+def handle_admin_file_actions(call):
+    """معالجة أوامر ملفات الأدمن القديمة"""
+    bot.answer_callback_query(call.id, "ℹ️ استخدم زر '👑 رفع ملف (أدمن)' الآن")
 
 @bot.message_handler(func=lambda m: m.text == '📊 إحصائياتي')
 def show_my_stats(message):
@@ -2238,6 +2339,8 @@ def show_my_stats(message):
         (user_id,), fetch_one=True
     ) else 0
     
+    limits = get_user_limits(user_id)
+    
     msg = f"""📊 إحصائياتك:
 
 👤 المستخدم: {user_data['username']}
@@ -2245,12 +2348,12 @@ def show_my_stats(message):
 👑 الصلاحية: {'أدمن' if user_data.get('is_admin') else 'مستخدم عادي'}
 
 🤖 البوتات:
-• المجموع: {len(bots) if bots else 0}/{MAX_BOTS_PER_USER}
+• المجموع: {len(bots) if bots else 0}/{limits['max_bots']}
 • قيد التشغيل: {running_count}
 
 💾 التخزين:
 • المستخدم: {disk_usage:.2f}MB
-• الحد: {RESOURCE_DISK_LIMIT_MB}MB
+• الحد: {limits['disk_limit_mb']}MB
 
 📤 الطلبات:
 • الملفات المرسلة: {request_count}
@@ -2266,6 +2369,8 @@ def show_my_stats(message):
 def show_help(message):
     """عرض المساعدة"""
     user_id = message.from_user.id
+    
+    limits = get_user_limits(user_id)
     
     help_text = f"""❓ دليل الاستخدام:
 
@@ -2285,13 +2390,14 @@ def show_help(message):
 """
     
     # إضافة قسم الأدمن إذا كان المستخدم أدمن
-    if is_admin(user_id) or is_user_admin(user_id):
-        help_text += """
+    if is_admin_user(user_id):
+        help_text += f"""
 👑 ميزات الأدمن:
 • رفع أي ملف بدون فحص أمني
 • تشغيل ملفات بايثون مباشرة
 • إدارة المستخدمين
-• التحكم الكامل بالنظام
+• حدود أعلى: {limits['disk_limit_mb']}MB تخزين
+• المكتبات مثبتة في venv الخاص بك
 """
     
     help_text += f"""
@@ -2301,11 +2407,12 @@ def show_help(message):
 • التوكنات مشفرة ومحمية
 • مراقبة الموارد في الوقت الحقيقي
 
-⚙️ الحدود:
-• عدد البوتات: {MAX_BOTS_PER_USER}
-• حجم الملف: {MAX_FILE_SIZE_MB}MB
-• RAM: {RESOURCE_RAM_LIMIT_MB}MB
-• CPU: {RESOURCE_CPU_LIMIT_PERCENT}%
+⚙️ حدود حسابك:
+• عدد البوتات: {limits['max_bots']}
+• حجم الملف: {limits['max_file_size_mb']}MB
+• RAM: {limits['ram_limit_mb']}MB
+• CPU: {limits['cpu_limit_percent']}%
+• التخزين: {limits['disk_limit_mb']}MB
 
 ⚠️ انتهاك القواعد يؤدي للحظر!
 """
@@ -2318,7 +2425,7 @@ def show_help(message):
 @bot.message_handler(commands=['admin', 'admin_panel'])
 def admin_panel(message):
     """لوحة تحكم المطور"""
-    if not is_admin(message.from_user.id) and not is_user_admin(message.from_user.id):
+    if not is_admin_user(message.from_user.id):
         bot.send_message(message.chat.id, "⛔ ليس لديك صلاحيات.")
         return
     
@@ -2338,6 +2445,7 @@ def admin_panel(message):
         ('📤 الملفات المرسلة', 'admin_panel_sent_files'),
         ('👑 إدارة الأدمن', 'admin_panel_manage_admins'),
         ('🔄 إعادة تشغيل الكل', 'admin_panel_reboot_all'),
+        ('🐍 بيئات المستخدمين', 'admin_panel_venvs'),
     ]
     
     for text, callback in buttons:
@@ -2353,7 +2461,7 @@ def admin_panel(message):
 @bot.callback_query_handler(func=lambda c: c.data.startswith('admin_panel_'))
 def handle_admin_panel_actions(call):
     """معالجة أوامر لوحة الأدمن"""
-    if not is_admin(call.from_user.id) and not is_user_admin(call.from_user.id):
+    if not is_admin_user(call.from_user.id):
         bot.answer_callback_query(call.id, "⛔ ليس لديك صلاحيات.")
         return
     
@@ -2507,21 +2615,26 @@ def handle_admin_panel_actions(call):
         files = get_admin_files()
         if files:
             msg = "📁 ملفات الأدمن:\n\n"
+            markup = types.InlineKeyboardMarkup(row_width=2)
+            
             for f in files[:10]:
                 file_id, filename, file_size, description, uploaded_at, is_public, download_count = f
                 size_mb = file_size / (1024 * 1024) if file_size > 0 else 0
-                public_emoji = "🌐" if is_public else "🔒"
-                msg += f"#{file_id} {public_emoji} {filename}\n"
+                
+                msg += f"📎 {filename}\n"
                 msg += f"   الحجم: {size_mb:.2f}MB\n"
-                msg += f"   التحميلات: {download_count}\n"
+                msg += f"   المسار: users/user_{ADMIN_ID}/bot_files/{filename}\n"
                 msg += f"   الوقت: {uploaded_at}\n\n"
+                
+                btn_run = types.InlineKeyboardButton(f"▶️ {filename[:10]}", callback_data=f"admin_run_{filename}")
+                markup.add(btn_run)
             
             if len(files) > 10:
                 msg += f"\n... و {len(files) - 10} ملف آخر"
         else:
             msg = "📭 لا توجد ملفات للأدمن."
         
-        bot.send_message(call.message.chat.id, msg)
+        bot.send_message(call.message.chat.id, msg, reply_markup=markup)
     
     elif action == 'backups':
         backups = db_execute(
@@ -2545,7 +2658,7 @@ def handle_admin_panel_actions(call):
             # إضافة أزرار للتحميل
             markup = types.InlineKeyboardMarkup(row_width=2)
             
-            for backup in backups[:5]:  # أول 5 فقط
+            for backup in backups[:5]:
                 backup_id = backup[0]
                 btn_download = types.InlineKeyboardButton(f"⬇️ #{backup_id}", callback_data=f"admin_backup_{backup_id}")
                 markup.add(btn_download)
@@ -2628,12 +2741,14 @@ def handle_admin_panel_actions(call):
             
             if os.path.exists(file_path):
                 try:
+                    python_path = sandbox_manager.get_user_venv_python(user_id)
+                    
                     bot_stdout = os.path.join(sandbox['logs'], f"{filename}.stdout")
                     bot_stderr = os.path.join(sandbox['logs'], f"{filename}.stderr")
                     
                     with open(bot_stdout, 'w') as stdout_f, open(bot_stderr, 'w') as stderr_f:
                         process = subprocess.Popen(
-                            ['python3', file_path],
+                            [python_path, file_path],
                             cwd=sandbox['bots'],
                             stdout=stdout_f,
                             stderr=stderr_f,
@@ -2650,6 +2765,41 @@ def handle_admin_panel_actions(call):
         
         bot.send_message(call.message.chat.id, f"✅ تم إعادة تشغيل {rebooted} بوت من أصل {len(bots)}.")
         add_activity_log(call.from_user.id, "admin_reboot_all", f"Rebooted: {rebooted}")
+    
+    elif action == 'venvs':
+        users = db_execute(
+            "SELECT user_id, username FROM users ORDER BY created_at DESC LIMIT 10",
+            fetch_all=True
+        )
+        
+        msg = "🐍 بيئات المستخدمين الافتراضية:\n\n"
+        
+        if users:
+            for user in users:
+                user_id = user[0]
+                username = user[1]
+                
+                user_dir = os.path.join(USERS_DIR, f"user_{user_id}")
+                venv_dir = os.path.join(user_dir, 'venv')
+                
+                if os.path.exists(venv_dir):
+                    venv_size = 0
+                    for dirpath, dirnames, filenames in os.walk(venv_dir):
+                        for f in filenames:
+                            fp = os.path.join(dirpath, f)
+                            if os.path.exists(fp):
+                                venv_size += os.path.getsize(fp)
+                    venv_size_mb = venv_size / (1024 * 1024)
+                    
+                    # جلب عدد المكتبات
+                    libraries = sandbox_manager.get_user_requirements(user_id)
+                    lib_count = len(libraries.strip().split('\n')) if libraries.strip() and "خطأ" not in libraries else 0
+                    
+                    msg += f"👤 {user_id} (@{username})\n"
+                    msg += f"   حجم الـ venv: {venv_size_mb:.1f}MB\n"
+                    msg += f"   المكتبات: {lib_count}\n\n"
+        
+        bot.send_message(call.message.chat.id, msg)
     
     bot.answer_callback_query(call.id)
 
@@ -2697,11 +2847,9 @@ def handle_admin_management_input(message):
         target_id = int(target_id_str)
         
         if state == 'awaiting_add_admin':
-            # التحقق من عدم إضافة المطور الرئيسي نفسه
             if target_id == ADMIN_ID:
                 bot.send_message(message.chat.id, "❌ المطور الرئيسي مضاف مسبقاً.")
             else:
-                # جلب اسم المستخدم
                 target_data = get_user_data(target_id)
                 if not target_data:
                     bot.send_message(message.chat.id, "❌ المستخدم غير موجود.")
@@ -2716,11 +2864,9 @@ def handle_admin_management_input(message):
                     add_activity_log(user_id, "add_admin", f"Added admin: {target_id}")
         
         elif state == 'awaiting_remove_admin':
-            # التحقق من عدم إزالة المطور الرئيسي
             if target_id == ADMIN_ID:
                 bot.send_message(message.chat.id, "❌ لا يمكن إزالة المطور الرئيسي.")
             else:
-                # التحقق إذا كان المستخدم أدمن
                 target_data = get_user_data(target_id)
                 if not target_data:
                     bot.send_message(message.chat.id, "❌ المستخدم غير موجود.")
@@ -2744,7 +2890,7 @@ def handle_admin_management_input(message):
 @bot.message_handler(commands=['ban'])
 def admin_ban_user(message):
     """حظر مستخدم"""
-    if not is_admin(message.from_user.id) and not is_user_admin(message.from_user.id):
+    if not is_admin_user(message.from_user.id):
         return
     
     parts = message.text.split()
@@ -2772,7 +2918,7 @@ def admin_ban_user(message):
 @bot.message_handler(commands=['unban'])
 def admin_unban_user(message):
     """فك حظر مستخدم"""
-    if not is_admin(message.from_user.id) and not is_user_admin(message.from_user.id):
+    if not is_admin_user(message.from_user.id):
         return
     
     parts = message.text.split()
@@ -2791,7 +2937,7 @@ def admin_unban_user(message):
 @bot.message_handler(commands=['backups'])
 def list_admin_backups(message):
     """عرض النسخ الاحتياطية للأدمن"""
-    if not is_admin(message.from_user.id) and not is_user_admin(message.from_user.id):
+    if not is_admin_user(message.from_user.id):
         return
     
     backups = db_execute(
@@ -2816,7 +2962,7 @@ def list_admin_backups(message):
     # إضافة أزرار للتحميل
     markup = types.InlineKeyboardMarkup(row_width=2)
     
-    for backup in backups[:5]:  # أول 5 فقط
+    for backup in backups[:5]:
         backup_id = backup[0]
         btn_download = types.InlineKeyboardButton(f"⬇️ #{backup_id}", callback_data=f"admin_backup_{backup_id}")
         markup.add(btn_download)
@@ -2829,7 +2975,7 @@ def list_admin_backups(message):
 @bot.message_handler(commands=['sentfiles'])
 def list_sent_files(message):
     """عرض الملفات المرسلة للأدمن"""
-    if not is_admin(message.from_user.id) and not is_user_admin(message.from_user.id):
+    if not is_admin_user(message.from_user.id):
         return
     
     sent_files = get_sent_files(20)
@@ -2859,7 +3005,7 @@ def list_sent_files(message):
 @bot.message_handler(commands=['admins'])
 def list_admins_command(message):
     """عرض قائمة الأدمن"""
-    if not is_admin(message.from_user.id) and not is_user_admin(message.from_user.id):
+    if not is_admin_user(message.from_user.id):
         return
     
     admins = get_all_admins()
@@ -2880,7 +3026,7 @@ def list_admins_command(message):
 @bot.callback_query_handler(func=lambda c: c.data.startswith('admin_backup_'))
 def handle_admin_backup(call):
     """معالجة تحميل النسخ الاحتياطية"""
-    if not is_admin(call.from_user.id) and not is_user_admin(call.from_user.id):
+    if not is_admin_user(call.from_user.id):
         bot.answer_callback_query(call.id, "⛔ ليس لديك صلاحية.")
         return
     
@@ -3013,13 +3159,36 @@ if __name__ == "__main__":
     if ADMIN_ID:
         add_admin_db(ADMIN_ID, "Main Developer")
         print(f"✅ تم إضافة المطور الرئيسي {ADMIN_ID} كأدمن")
+        
+        # إنشاء sandbox خاصة للأدمن مع مكتبات إضافية
+        sandbox = sandbox_manager.create_user_sandbox(ADMIN_ID)
+        print(f"✅ تم إنشاء بيئة خاصة للأدمن {ADMIN_ID}")
+        
+        # تثبيت مكتبات إضافية للأدمن
+        print("📦 جاري تثبيت مكتبات للأدمن...")
+        admin_libs = [
+            'cloudpickle', 'numpy', 'pandas', 'flask', 'django',
+            'requests', 'aiohttp', 'psutil', 'cryptography'
+        ]
+        
+        python_path = sandbox_manager.get_user_venv_python(ADMIN_ID)
+        if os.name == 'nt':
+            pip_path = python_path.replace('python.exe', 'pip.exe')
+        else:
+            pip_path = python_path.replace('python', 'pip')
+        
+        for lib in admin_libs:
+            try:
+                subprocess.run([pip_path, 'install', lib], 
+                             capture_output=True, timeout=60)
+                print(f"   ✅ {lib}")
+            except:
+                print(f"   ⚠️ {lib}")
     
     # إنشاء مجلدات الأدمن
-    admin_dir = os.path.join(BASE_DIR, 'admin_files')
     admin_backup_dir = os.path.join(BASE_DIR, 'admin_backup')
     admin_alerts_dir = os.path.join(BASE_DIR, 'admin_alerts')
     
-    os.makedirs(admin_dir, exist_ok=True)
     os.makedirs(admin_backup_dir, exist_ok=True)
     os.makedirs(admin_alerts_dir, exist_ok=True)
     
@@ -3045,12 +3214,14 @@ if __name__ == "__main__":
             
             if os.path.exists(file_path):
                 try:
+                    python_path = sandbox_manager.get_user_venv_python(user_id)
+                    
                     bot_stdout = os.path.join(sandbox['logs'], f"{filename}.stdout")
                     bot_stderr = os.path.join(sandbox['logs'], f"{filename}.stderr")
                     
                     with open(bot_stdout, 'a') as stdout_f, open(bot_stderr, 'a') as stderr_f:
                         process = subprocess.Popen(
-                            ['python3', file_path],
+                            [python_path, file_path],
                             cwd=sandbox['bots'],
                             stdout=stdout_f,
                             stderr=stderr_f,
@@ -3069,16 +3240,18 @@ if __name__ == "__main__":
                 update_hosted_bot_status_db(filename, 'stopped', error_log="File not found")
     
     print("=" * 50)
-    print("🤖 نظام استضافة البوتات الآمن")
+    print("🤖 نظام استضافة البوتات الآمن - النسخة المحسنة")
     print("=" * 50)
     print(f"• المطور: {ADMIN_ID}")
     print(f"• القناة: {REQUIRED_CHANNEL_ID}")
-    print(f"• حد البوتات: {MAX_BOTS_PER_USER}")
-    print(f"• حد RAM: {RESOURCE_RAM_LIMIT_MB}MB")
-    print(f"• حد CPU: {RESOURCE_CPU_LIMIT_PERCENT}%")
+    print(f"• حد البوتات العادي: {MAX_BOTS_PER_USER}")
+    print(f"• حد البوتات للأدمن: 100")
+    print(f"• حد التخزين العادي: {RESOURCE_DISK_LIMIT_MB}MB")
+    print(f"• حد التخزين للأدمن: 10GB")
     print(f"• نظام التحويل الإجباري: ✅ فعال")
     print(f"• جميع الملفات ترسل للأدمن: ✅ مفعل")
     print(f"• نظام إدارة الأدمن: ✅ فعال")
+    print(f"• نظام venv منفصل: ✅ فعال")
     print("=" * 50)
     print("✅ البوت جاهز للعمل!")
     
