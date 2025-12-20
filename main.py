@@ -21,7 +21,8 @@ from collections import defaultdict
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-
+# في أعلى الملف مع باقي الـ imports
+import sys  # ← أضف هذا السطر
 # ═══════════════════════════════════════════════════════════════════
 # ⚙️ إعدادات البوت الأساسية
 # ═══════════════════════════════════════════════════════════════════
