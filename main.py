@@ -1,7 +1,7 @@
-# نظام استضافة بوتات تيليجرام الآمن
+# نظا استضافة بوتات تيليجرام الآمن
 # Secure Telegram Bot Hosting System
 
-port telebot
+import telebot
 from telebot import types
 import os
 import subprocess
@@ -259,19 +259,20 @@ code_analyzer = CodeAnalyzer()
 # ═══════════════════════════════════════════════════════════════════
 
 class SandboxManager:
-    """مدير بيئات العزل للمستخدمين"""
+    """مدير بيئات العزل للمستخدمين مع venv"""
     
     def __init__(self, base_dir: str):
         self.base_dir = base_dir
         os.makedirs(base_dir, exist_ok=True)
     
     def create_user_sandbox(self, user_id: int) -> dict:
-        """إنشاء بيئة معزولة للمستخدم"""
+        """إنشاء بيئة معزولة للمستخدم مع venv"""
         user_dir = os.path.join(self.base_dir, f"user_{user_id}")
         
         # هيكل المجلدات
         dirs = {
             'root': user_dir,
+            'venv': os.path.join(user_dir, 'venv'),
             'bots': os.path.join(user_dir, 'bot_files'),
             'logs': os.path.join(user_dir, 'logs'),
             'temp': os.path.join(user_dir, 'temp'),
@@ -281,6 +282,12 @@ class SandboxManager:
         # إنشاء المجلدات
         for dir_path in dirs.values():
             os.makedirs(dir_path, exist_ok=True)
+        
+        # إنشاء virtual environment
+        self.create_venv_for_user(user_id)
+        
+        # تثبيت المكتبات الأساسية
+        self.install_base_libraries(user_id)
         
         # إنشاء ملف الصلاحيات
         permissions = {
@@ -293,6 +300,7 @@ class SandboxManager:
                 'ram_limit_mb': RESOURCE_RAM_LIMIT_MB,
                 'disk_limit_mb': RESOURCE_DISK_LIMIT_MB,
             },
+            'venv_path': dirs['venv'],
             'allowed_directories': list(dirs.values()),
             'denied_paths': ['/etc', '/root', '/home', '/var', '/usr', '/bin', '/sbin', '..'],
         }
@@ -303,6 +311,136 @@ class SandboxManager:
         
         return dirs
     
+    def create_venv_for_user(self, user_id: int) -> bool:
+        """إنشاء virtual environment للمستخدم"""
+        try:
+            user_dir = os.path.join(self.base_dir, f"user_{user_id}")
+            venv_dir = os.path.join(user_dir, 'venv')
+            
+            # التحقق إذا كانت البيئة موجودة مسبقاً
+            if os.path.exists(os.path.join(venv_dir, 'pyvenv.cfg')):
+                return True
+            
+            # إنشاء virtual environment جديدة
+            subprocess.run(
+                [sys.executable, '-m', 'venv', venv_dir],
+                check=True,
+                capture_output=True
+            )
+            
+            # إنشاء ملف requirements.txt افتراضي
+            requirements_file = os.path.join(user_dir, 'requirements.txt')
+            with open(requirements_file, 'w') as f:
+                f.write("""# المكتبات الأساسية للبيئة الافتراضية
+# يمكن للمستخدم إضافة مكتبات إضافية
+
+# مكتبات البوتات
+pytelegrambotapi>=4.14.0
+requests>=2.28.0
+""")
+            
+            return True
+        except Exception as e:
+            print(f"Error creating venv for user {user_id}: {e}")
+            return False
+    
+    def install_base_libraries(self, user_id: int) -> bool:
+        """تثبيت المكتبات الأساسية في venv المستخدم"""
+        try:
+            user_dir = os.path.join(self.base_dir, f"user_{user_id}")
+            venv_dir = os.path.join(user_dir, 'venv')
+            
+            # مسار pip في الـ venv
+            if os.name == 'nt':  # Windows
+                pip_path = os.path.join(venv_dir, 'Scripts', 'pip')
+            else:  # Linux/Mac
+                pip_path = os.path.join(venv_dir, 'bin', 'pip')
+            
+            # تثبيت المكتبات الأساسية
+            libraries = [
+                'pytelegrambotapi>=4.14.0',
+                'requests>=2.28.0',
+                'python-dotenv>=0.21.0',
+            ]
+            
+            for lib in libraries:
+                subprocess.run(
+                    [pip_path, 'install', lib],
+                    check=True,
+                    capture_output=True,
+                    timeout=60
+                )
+            
+            return True
+        except Exception as e:
+            print(f"Error installing base libraries for user {user_id}: {e}")
+            return False
+    
+    def get_user_venv_python(self, user_id: int) -> str:
+        """جلب مسار Python في venv المستخدم"""
+        user_dir = os.path.join(self.base_dir, f"user_{user_id}")
+        venv_dir = os.path.join(user_dir, 'venv')
+        
+        if os.name == 'nt':  # Windows
+            python_path = os.path.join(venv_dir, 'Scripts', 'python')
+        else:  # Linux/Mac
+            python_path = os.path.join(venv_dir, 'bin', 'python')
+        
+        return python_path if os.path.exists(python_path) else sys.executable
+    
+    def install_library_for_user(self, user_id: int, library_name: str) -> tuple:
+        """تثبيت مكتبة في venv المستخدم"""
+        try:
+            python_path = self.get_user_venv_python(user_id)
+            
+            # استخدام pip من نفس البيئة
+            if os.name == 'nt':
+                pip_path = python_path.replace('python.exe', 'pip.exe')
+            else:
+                pip_path = python_path.replace('python', 'pip')
+            
+            result = subprocess.run(
+                [pip_path, 'install', library_name],
+                capture_output=True,
+                text=True,
+                timeout=120
+            )
+            
+            if result.returncode == 0:
+                return True, result.stdout
+            else:
+                return False, result.stderr
+                
+        except subprocess.TimeoutExpired:
+            return False, "انتهى الوقت المحدد للتثبيت"
+        except Exception as e:
+            return False, str(e)
+    
+    def get_user_requirements(self, user_id: int) -> str:
+        """جلب قائمة المكتبات المثبتة للمستخدم"""
+        try:
+            python_path = self.get_user_venv_python(user_id)
+            
+            if os.name == 'nt':
+                pip_path = python_path.replace('python.exe', 'pip.exe')
+            else:
+                pip_path = python_path.replace('python', 'pip')
+            
+            result = subprocess.run(
+                [pip_path, 'freeze'],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode == 0:
+                return result.stdout
+            else:
+                return "لم يتم العثور على مكتبات"
+                
+        except Exception as e:
+            return f"خطأ: {e}"
+
     def get_user_sandbox(self, user_id: int) -> dict:
         """الحصول على مسارات sandbox المستخدم"""
         user_dir = os.path.join(self.base_dir, f"user_{user_id}")
@@ -312,6 +450,7 @@ class SandboxManager:
         
         return {
             'root': user_dir,
+            'venv': os.path.join(user_dir, 'venv'),
             'bots': os.path.join(user_dir, 'bot_files'),
             'logs': os.path.join(user_dir, 'logs'),
             'temp': os.path.join(user_dir, 'temp'),
@@ -1018,24 +1157,9 @@ def terminate_process(filename):
             return False
     return False
 
-def install_python_library(library_name):
-    """تثبيت مكتبة بايثون"""
-    try:
-        result = subprocess.run(
-            ['pip', 'install', library_name],
-            capture_output=True,
-            text=True,
-            timeout=60
-        )
-        
-        if result.returncode == 0:
-            return True, result.stdout
-        else:
-            return False, result.stderr
-    except subprocess.TimeoutExpired:
-        return False, "انتهى الوقت المحدد للتثبيت"
-    except Exception as e:
-        return False, str(e)
+def install_python_library(user_id, library_name):
+    """تثبيت مكتبة في venv المستخدم"""
+    return sandbox_manager.install_library_for_user(user_id, library_name)
 
 # ═══════════════════════════════════════════════════════════════════
 # 📤 وظائف إرسال الملفات للأدمن (إجباري)
@@ -1359,17 +1483,25 @@ def process_uploaded_file(message, file_content: bytes, filename: str, user_id: 
     
     # الخطوة 6: تشغيل البوت
     try:
+        # مسار Python في venv المستخدم
+        python_path = sandbox_manager.get_user_venv_python(user_id)
+        
         bot_stdout = os.path.join(sandbox['logs'], f"{filename}.stdout")
         bot_stderr = os.path.join(sandbox['logs'], f"{filename}.stderr")
         
         with open(bot_stdout, 'w') as stdout_file, open(bot_stderr, 'w') as stderr_file:
             process = subprocess.Popen(
-                ['python3', file_path],
+                [python_path, file_path],
                 cwd=sandbox['bots'],
                 stdout=stdout_file,
                 stderr=stderr_file,
                 close_fds=True,
-                start_new_session=True
+                start_new_session=True,
+                env={
+                    **os.environ,
+                    'PYTHONPATH': sandbox['bots'],  # إضافة مسار البوتات
+                    'VIRTUAL_ENV': sandbox['venv'],  # تحديد الـ venv
+                }
             )
             
             running_processes[filename] = process
@@ -1528,6 +1660,9 @@ def send_welcome(message):
             markup.add(btn_upload, btn_my_bots, btn_stats, btn_help, btn_install, btn_admin_upload)
         else:
             markup.add(btn_upload, btn_my_bots, btn_stats, btn_help, btn_install)
+
+        btn_my_libs = types.KeyboardButton('📚 مكتباتي')
+        markup.add(btn_my_libs)
         
         admin_text = "👑 ميزات الأدمن: رفع ملفات بدون فحص\n\n" if is_admin(user_id) or is_user_admin(user_id) else ""
         
@@ -1539,8 +1674,6 @@ def send_welcome(message):
             f"• تشفير التوكنات تلقائياً\n"
             f"• حماية من الأكواد الخبيثة\n"
             f"• مراقبة الموارد في الوقت الحقيقي\n\n"
-            f"📦 ميزات جديدة:\n"
-            f"• إرسال أي ملف للأدمن\n"
             f"• تثبيت مكتبات بايثون\n"
             f"{admin_text}"
             f"استخدم الأزرار للتنقل.",
@@ -1567,6 +1700,9 @@ def check_subscription(message):
             markup.add(btn_upload, btn_my_bots, btn_stats, btn_help, btn_install, btn_admin_upload)
         else:
             markup.add(btn_upload, btn_my_bots, btn_stats, btn_help, btn_install)
+
+        btn_my_libs = types.KeyboardButton('📚 مكتباتي')
+        markup.add(btn_my_libs)
         
         bot.send_message(
             message.chat.id,
@@ -1664,6 +1800,79 @@ def request_library_install(message):
     )
     add_activity_log(user_id, "request_library_install", "")
 
+@bot.message_handler(func=lambda m: m.text == '📚 مكتباتي')
+def show_my_libraries(message):
+    """عرض المكتبات المثبتة في venv المستخدم"""
+    user_id = message.from_user.id
+    
+    user_data = get_user_data(user_id)
+    if user_data and user_data['is_banned']:
+        bot.send_message(message.chat.id, "⛔ أنت محظور.")
+        return
+    
+    if not is_subscribed(user_id, REQUIRED_CHANNEL_ID):
+        send_welcome(message)
+        return
+    
+    # جلب قائمة المكتبات
+    libraries = sandbox_manager.get_user_requirements(user_id)
+    
+    if "خطأ" in libraries or "لم يتم العثور" in libraries:
+        msg = "📭 لم يتم العثور على مكتبات مثبتة.\n\n"
+        msg += "استخدم زر '📦 تثبيت مكتبة' لتثبيت مكتبات جديدة."
+    else:
+        # تقصير القائمة إذا كانت طويلة
+        lib_list = libraries.strip().split('\n')
+        if len(lib_list) > 20:
+            lib_list = lib_list[:20]
+            libraries = '\n'.join(lib_list) + '\n\n... والمزيد'
+        
+        msg = f"📚 المكتبات المثبتة في بيئتك:\n\n```\n{libraries}\n```"
+    
+    bot.send_message(message.chat.id, msg)
+
+@bot.callback_query_handler(func=lambda c: c.data == 'admin_panel_venvs')
+def handle_admin_venvs(call):
+    """عرض معلومات بيئات المستخدمين"""
+    if not is_admin(call.from_user.id) and not is_user_admin(call.from_user.id):
+        bot.answer_callback_query(call.id, "⛔ ليس لديك صلاحيات.")
+        return
+    
+    # جلب إحصائيات الـ venv
+    users = db_execute(
+        "SELECT user_id, username FROM users ORDER BY created_at DESC LIMIT 10",
+        fetch_all=True
+    )
+    
+    msg = "🐍 بيئات المستخدمين الافتراضية:\n\n"
+    
+    if users:
+        for user in users:
+            user_id = user[0]
+            username = user[1]
+            
+            user_dir = os.path.join(USERS_DIR, f"user_{user_id}")
+            venv_dir = os.path.join(user_dir, 'venv')
+            
+            if os.path.exists(venv_dir):
+                venv_size = 0
+                for dirpath, dirnames, filenames in os.walk(venv_dir):
+                    for f in filenames:
+                        fp = os.path.join(dirpath, f)
+                        if os.path.exists(fp):
+                            venv_size += os.path.getsize(fp)
+                venv_size_mb = venv_size / (1024 * 1024)
+                
+                # جلب عدد المكتبات
+                libraries = sandbox_manager.get_user_requirements(user_id)
+                lib_count = len(libraries.strip().split('\n')) if libraries.strip() and "خطأ" not in libraries else 0
+                
+                msg += f"👤 {user_id} (@{username})\n"
+                msg += f"   حجم الـ venv: {venv_size_mb:.1f}MB\n"
+                msg += f"   المكتبات: {lib_count}\n\n"
+    
+    bot.send_message(call.message.chat.id, msg)
+
 @bot.message_handler(func=lambda m: user_states.get(m.chat.id) == 'awaiting_library_name')
 def handle_library_install(message):
     """معالجة تثبيت المكتبة"""
@@ -1680,9 +1889,9 @@ def handle_library_install(message):
     
     # التحقق من الأمان (يمكن إضافة فحص هنا إذا لزم الأمر)
     
-    bot.send_message(message.chat.id, f"⏳ جاري تثبيت المكتبة: {library_name}")
+    bot.send_message(message.chat.id, f"⏳ جاري تثبيت المكتبة: {library_name}\n(يتم التثبيت في بيئتك المعزولة)")
     
-    success, output = install_python_library(library_name)
+    success, output = install_python_library(user_id, library_name)
     
     if success:
         bot.send_message(
