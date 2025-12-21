@@ -1,7 +1,7 @@
 # نظا استضافة بوتات تيليجرام الآمن
 # Secure Telegram Bot Hosting System
 
-import telebot
+mport telebot
 from telebot import types
 import os
 import subprocess
